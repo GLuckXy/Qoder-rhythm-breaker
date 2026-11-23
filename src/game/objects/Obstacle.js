@@ -86,18 +86,11 @@ export function isBedInstance(inst) {
   return !!inst && (inst.type === 'bed' || inst.track === 'bed' || inst.judgable === false);
 }
 
-/** C4 的 id 惯例：`lv{N}-{track}-{NNN}`（复活补位加 `-rv`）。SOUND 目前发 `{N}-{track}-{i}`，见 CR-11。 */
-export function formatObstacleId(levelNo, track, index, suffix = '') {
-  if (!TRACKS.includes(track)) throw new Error(`[Obstacle] formatObstacleId: bad track ${track}`);
-  const n = String(Math.abs(index | 0)).padStart(3, '0');
-  return `lv${levelNo | 0}-${track}-${n}${suffix ? `-${suffix}` : ''}`;
-}
-
-/** id → 解析（两种口径都吃：`lv2-kick-008` 与 SOUND 现行的 `2-kick-8`） */
+/** id → 解析（两种口径都吃：`lv2-kick-008` 与 SOUND 现行的 `2-kick-8`，见 CR-11）。 */
 export function parseObstacleId(id) {
-  const m = /^lv?(\d+)-(kick|bass|synth)-(\d+)(?:-([a-z0-9]+))?$/i.exec(String(id || ''));
+  const m = /^lv?(\d+)-(kick|bass|synth)-(\d+)$/i.exec(String(id || ''));
   if (!m) return null;
-  return { level: +m[1], track: m[2], index: +m[3], suffix: m[4] || null };
+  return { level: +m[1], track: m[2], index: +m[3] };
 }
 
 /**

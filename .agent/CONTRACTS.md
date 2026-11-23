@@ -615,3 +615,18 @@ CORE-7 修完根因后如实拒绝伪造验收：**评级 S/A/B 在六张出厂�
 本卡由「leader 工程裁决」升级为「需求方已批复」，不再需要复核；§7.3 的谱面 Perfect 率继续原样展示与存档，
 评级用 `encounterRate`（含 Q5 的寂静段光点）是**需求口径**而非工程妥协。备选 (i)(ii)(iii) 关闭，不再重开。
 「先出初版」同时给出轮次授权：D7–D9 的手感/表现/上线轮按初版边界处理，试玩与多浏览器不在本轮验收线内。
+
+### CR-15 | 提出+执行：leader（WORLD 名下文件，代改）| 轮次：R11 | 涉及契约：C4 障碍 id | 状态：**已落地，待 WORLD 复核**
+
+DEF-04 推翻「复活铸 `${id}-rvN` 新身份」之后，WORLD 的工具层还留着这条已废口径的**载体**：
+`objects/Obstacle.js` 里 `formatObstacleId(levelNo, track, index, suffix)` 的注释写着「C4 的 id 惯例：…（复活补位加 `-rv`）」，
+而 `parseObstacleId` 的正则带 `(?:-([a-z0-9]+))?` 捕获组并返回 `suffix` 字段。全仓扫描：这两个函数**零调用者**
+（`grep -rn formatObstacleId src/ tools/` 只命中定义本身；`WorldLayer.js:48` 与 `screenshotCheck.mjs:105` 的具名导入清单里都没有它们）。
+危害不是死代码本身，而是它给「再造一次 `-rvN`」留了现成的出口——C4 里连 `PRD` 都不提 `-rv`
+（`grep -rn '\-rv' E:/Xiang/codex/2026_11_06/rhythm-breaker-docs/` 命中 0，**这套后缀从来是实现发明，不是需求**），
+一旦有人用它铸身份，`contractTest.mjs` 的 `dupIds` / 「判定流里不出现 -rvN」两条断言立刻红，§7.3 固定分母再被破一次。
+
+处置：删 `formatObstacleId`；`parseObstacleId` 去掉 suffix 捕获组（返回对象不再有 `suffix` 字段），
+注释改为直陈两种在用的真实口径 `lv2-kick-008` / SOUND 现行的 `2-kick-8`。`TRACKS` 仍有三处使用，无残留未用导入；
+`node --check` 通过。`makeTestInstance` 同样是零调用，但**本次不动**——它可能被后续新门禁拿去用，删它属于过度清理。
+按 T2 这条本该由 WORLD 自己改，我代改的原因是它正与 W-13 并行、且这是纯删除无语义新增；WORLD 复核即可，不要求回滚。
