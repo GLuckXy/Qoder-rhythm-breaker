@@ -1129,6 +1129,678 @@ async function caseDebug() {
 }
 
 /* ------------------------------------------------------------------ */
+/* R2 共用夹具：真谱面 + MockClock + 三系统装配（K-07 / K-09 / K-12 / K-05） */
+/* ------------------------------------------------------------------ */
+
+const LEVEL_IDS = [1, 2, 3, 4, 5, 6];
+
+/** 读 SOUND 名下的谱面；缺文件返回 null（调用方 skip，不代造，T2）。 */
+function readLevel(id) {
+  const abs = join(SRC, 'data', 'levels', `level${id}.json`);
+  if (!existsSync(abs)) return null;
+  try {
+    return JSON.parse(readFileSync(abs, 'utf8'));
+  } catch (err) {
+    record('fail', `[levels] level${id}.json 解析失败`, String(err?.message ?? err));
+    return null;
+  }
+}
+
+/**
+ * 装配一关（纯 Node，不需要浏览器 / AudioContext）：
+ * MockClock 手动时间 + PatternGenerator 生成实例 + JudgeSystem + DisassembleSystem 真实订阅。
+ * @returns {object|null} rig
+ */
+function buildRig(PG, MC, JS, DS, cfg, opt = {}) {
+  const clock = new MC.MockClock({ t: 0 });
+  clock.init({
+    bpm: cfg.bpm,
+    sections: cfg.sections,
+    tempoChanges: cfg.tempoChanges,
+    introBeats: cfg.introBeats,
+    lengthBeats: cfg.lengthBeats
+  });
+  clock.start(opt.origin ?? 0);
+  const instances = PG.build(cfg, clock);
+  const events = new JS.EventLog();
+  const judge = JS.createJudgeSystem({ clock, events });
+  const ds = DS.createDisassembleSystem({ clock, events });
+  judge.setWindowScale(Number.isFinite(Number(cfg.windowScale)) ? Number(cfg.windowScale) : 1);
+  ds.load(cfg, { instances });
+  ds.bindJudge(judge);
+  judge.registerObstacles(instances);
+  const feed = [];
+  const ev = [];
+  ds.attach();
+  // §9 单向流：input → Judge → Disassemble（hp 的唯一写入口就是这里的这一次调用）
+  judge.onJudgment((j) => {
+    feed.push(j);
+    ds.onJudgment(j);
+  });
+  for (const name of ['hp-change', 'disassemble', 'revive', 'state-change']) {
+    ds.on(name, (p) => ev.push({ name, ...p }));
+  }
+  return { cfg, clock, instances, judge, ds, events, feed, ev, JS, PG };
+}
+
+/**
+ * 完美玩家：每 25ms 推一格（与 BeatClock 的轮询同粒度），到点按正确动作。
+ * @param {object} rig buildRig 的返回
+ * @param {{stomp?:boolean, stopAt?:string, beatSec?:number}} [opt]
+ */
+function playRig(rig, opt = {}) {
+  const { clock, judge, ds, cfg } = rig;
+  const live = rig.instances.filter((o) => o.judgable !== false).sort((a, b) => a.timeSec - b.timeSec);
+  const step = 0.025; // 与 BeatClock 的轮询同粒度（CLOCK_POLL_MS）
+  const end = clock.timeAtBeat(Number(cfg.lengthBeats) || 0) + 1.5;
+  const used = [];
+  let ptr = 0;
+  let dotPtr = 0;
+  while (clock.time() < end) {
+    clock.advanceBy(step);
+    while (ptr < live.length && live[ptr].timeSec <= clock.time() + 0.001) {
+      const o = live[ptr];
+      used.push(judge.onInput(rig.JS.expectedAction(o.type), o.timeSec));
+      ptr += 1;
+    }
+    if (opt.stomp && ds.state() === 'SILENCE') {
+      const dots = ds.silenceDots();
+      while (dotPtr < dots.length && clock.time() >= dots[dotPtr].timeSec) {
+        ds.stompDot({ atSec: dots[dotPtr].timeSec });
+        dotPtr += 1;
+      }
+    }
+    if (opt.stopAt && ds.state() === opt.stopAt) break;
+  }
+  return { inputs: used.length, endedAt: clock.time() };
+}
+
+/** 三轨满 hp 的手搭关卡（不依赖 SOUND 谱面，专门验 DIS-03/05/07/08 口径）。 */
+function synthCfg(over = {}) {
+  return {
+    id: 99,
+    bpm: 120,
+    lengthBeats: 64,
+    silenceBeats: 8,
+    introBeats: 4,
+    freeOrder: true,
+    tracks: { kick: { hp: 4 }, bass: { hp: 4 }, synth: { hp: 4 }, bed: { hp: 4, disassemble: false } },
+    sections: [
+      { beat: 0, state: 'INTRO', layers: [] },
+      { beat: 4, state: 'BUILD', layers: ['kick', 'bass', 'synth', 'bed'] },
+      { beat: 56, state: 'SILENCE', layers: [] }
+    ],
+    ...over
+  };
+}
+
+/** 手搭实例表：同 beat 不重叠，全部 core，judgable 缺省 true。 */
+function synthInstances(clock, spec) {
+  const TYPE = { kick: 'spike', bass: 'platform', synth: 'barrage', bed: 'bed' };
+  const out = [];
+  for (const [track, beats] of Object.entries(spec)) {
+    beats.forEach((b, i) => {
+      out.push({
+        id: `t-${track}-${b}-${i}`,
+        track,
+        type: TYPE[track],
+        beat: b,
+        timeSec: clock.timeAtBeat(b),
+        core: track !== 'bed',
+        pitchTier: 0,
+        speed: 1,
+        state: 'pending',
+        grade: null,
+        judgable: track !== 'bed'
+      });
+    });
+  }
+  return out;
+}
+
+/** 造一条 Judgment（走 ds.onJudgment 的唯一入口，不经 JudgeSystem）。 */
+function judg(track, over = {}) {
+  return {
+    grade: 'PERFECT',
+    obstacleId: `x-${track}`,
+    track,
+    type: { kick: 'spike', bass: 'platform', synth: 'barrage' }[track] || 'spike',
+    isCore: true,
+    actionMatch: true,
+    deltaMs: 0,
+    rule: 'window',
+    trigger: 'input',
+    key: 'jump',
+    penalizes: true,
+    ...over
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* case: revive-tie — K-07 复活三口径 + 分母固定 + 不补发历史（DIS-03/05）  */
+/* ------------------------------------------------------------------ */
+
+async function caseReviveTie() {
+  const MC = await load('src/mocks/MockClock.js', 'revive-tie');
+  const JS = await load('src/game/systems/JudgeSystem.js', 'revive-tie');
+  const DS = await load('src/game/systems/DisassembleSystem.js', 'revive-tie');
+  const PH = await load('src/data/physics.js', 'revive-tie');
+  if (!MC || !JS || !DS) return;
+
+  const cfg = synthCfg();
+  const clock = new MC.MockClock({ t: 0 });
+  clock.init({ bpm: cfg.bpm, sections: cfg.sections, introBeats: cfg.introBeats, lengthBeats: cfg.lengthBeats });
+  clock.start(0);
+  const events = new JS.EventLog();
+  const ds = DS.createDisassembleSystem({ clock, events });
+  const inst = synthInstances(clock, {
+    kick: [8, 9, 10, 11, 12, 13, 14, 15],
+    bass: [24, 25, 26, 27, 28, 29, 30, 31],
+    synth: [32, 33, 34, 35, 36, 37, 38, 39],
+    bed: [16, 17]
+  });
+  ds.load(cfg, { instances: inst });
+  const hpEvents = [];
+  const reviveEvents = [];
+  ds.on('hp-change', (p) => hpEvents.push(p));
+  ds.on('revive', (p) => reviveEvents.push(p));
+
+  eq('revive-tie: tracks.bed 被忽略（hpMax 0 / 不参与拆解）', `${ds.hpMax('bed')}/${ds.activeTrack('bed')}`, '0/false');
+  eq('revive-tie: 分母 = 可判定障碍总数（不含 bed）', ds.total(), 24);
+  eq('revive-tie: 核心障碍总数（coreTotal）', ds.coreTotal(), 24);
+  eq('revive-tie: 在场声部数', ds.trackCount(), 3);
+  eq('revive-tie: 三轨初始 hp', JSON.stringify(ds.hpByTrack()), '{"kick":4,"bass":4,"synth":4}');
+
+  // ① DIS-03 第三条口径：全部满 hp 的 MISS 不改音频、不复活
+  ds.onMiss({ atSec: clock.timeAtBeat(4) });
+  eq('revive-tie: 全 hp=4 的 MISS 不改 hp', JSON.stringify(ds.hpByTrack()), '{"kick":4,"bass":4,"synth":4}');
+  eq('revive-tie: 全 hp=4 的 MISS 不发任何音频事件（hp-change/revive 各 0）', `${hpEvents.length}/${reviveEvents.length}`, '0/0');
+  eq('revive-tie: 全 hp=4 的 MISS 仍清连击并起无敌帧', `${ds.counts().combo}/${ds.invulnerable(clock.timeAtBeat(4) + (PH.FROZEN.invulnSec - 0.01))}`, '0/true');
+  ds.onMiss({ atSec: clock.timeAtBeat(30) });
+  eq(`revive-tie: 无敌帧 ${PH.FROZEN.invulnSec}s 后结束`, ds.invulnerable(clock.timeAtBeat(30) + PH.FROZEN.invulnSec + 0.01), false);
+
+  // ② hp 最小者（PRD 原文「损失点数最多」＝hp 最小且 ≥0，不要求已拆空）
+  ds.onJudgment(judg('kick'));
+  ds.onJudgment(judg('kick'));
+  ds.onJudgment(judg('bass'));
+  eq('revive-tie: 扣血只经 onJudgment（kick2/bass3/synth4）', JSON.stringify(ds.hpByTrack()), '{"kick":2,"bass":3,"synth":4}');
+  eq('revive-tie: 最近一次 hp 写入者 = onJudgment', ds.lastHpWriter(), 'onJudgment');
+  const pick1 = ds.onMiss({ atSec: clock.timeAtBeat(40) });
+  eq('revive-tie: MISS 复活 hp 最小者（kick）', pick1, 'kick');
+  eq('revive-tie: 复活后 hp → 1（不是满 hp，DIS-05）', ds.hp('kick'), 1);
+  ds.reset();
+
+  // ③ 并列口径 kick > bass > synth
+  ds.onJudgment(judg('bass'));
+  ds.onJudgment(judg('bass'));
+  ds.onJudgment(judg('synth'));
+  ds.onJudgment(judg('synth'));
+  eq('revive-tie: 并列前置（bass2/synth2/kick4）', JSON.stringify(ds.hpByTrack()), '{"kick":4,"bass":2,"synth":2}');
+  eq('revive-tie: bass/synth 并列 → 取 bass', ds.onMiss({ atSec: clock.timeAtBeat(42) }), 'bass');
+  ds.reset();
+  ds.onJudgment(judg('synth'));
+  ds.onJudgment(judg('synth'));
+  ds.onMiss({ atSec: clock.timeAtBeat(42) });
+  eq('revive-tie: synth 独自最小 → 取 synth', ds.hp('synth'), 1);
+
+  // ④ 拆空 → 停止生成 → 复活只补当前拍之后（不补发历史）
+  ds.reset();
+  eq('revive-tie: reset 后分母不变（§7.3 / T6）', ds.total(), 24);
+  for (let i = 0; i < 4; i += 1) ds.onJudgment(judg('synth'));
+  eq('revive-tie: synth 拆空 → hp 0', ds.hp('synth'), 0);
+  eq('revive-tie: 三轨未全空 → disassembled() 仍 false', ds.disassembled(), false);
+  eq('revive-tie: 拆空声部进入 disassembledTracks()', JSON.stringify(ds.disassembledTracks()), '["synth"]');
+  eq('revive-tie: 停止生成（在场实例里 synth 归零）', ds.activeInstances().filter((o) => o.track === 'synth').length, 0);
+  const beatNow = 34;
+  const pick2 = ds.onMiss({ atSec: clock.timeAtBeat(beatNow) });
+  eq('revive-tie: 已拆空者被 MISS 复活', pick2, 'synth');
+  const revived = ds.activeInstances().filter((o) => o.state === 'revived');
+  eq('revive-tie: 复活新实例数 = 当前拍之后的原始事件数', revived.length, 5);
+  ok('revive-tie: 复活实例的 beat 全部 > 当前拍（不补发历史，DIS-05）', revived.every((o) => o.beat > beatNow), JSON.stringify(revived.map((o) => o.beat)));
+  ok('revive-tie: 复活实例 id 带 -rvN 后缀且与源 id 不同', revived.every((o) => /-rv\d+$/.test(o.id) && o.sourceId !== o.id));
+  eq('revive-tie: 复活不改分母', ds.total(), 24);
+  eq('revive-tie: 复活后实例 id 全表唯一（不出现同拍双实例）', new Set(ds.activeInstances().map((o) => o.id)).size, ds.activeInstances().length);
+  eq('revive-tie: 复活后 hp = REVIVE_HP', ds.hp('synth'), DS.REVIVE_HP);
+  eq('revive-tie: hp-change 事件的 reason 标注 revive', reviveEvents.length > 0 && hpEvents.some((p) => p.reason === 'revive'), true);
+
+  // ⑤ 唯一过滤点：emptyBeat / penalizes:false 直通，不扣血不清连击
+  ds.reset();
+  ds.onJudgment(judg('kick'));
+  const comboBefore = ds.counts().combo;
+  const missBefore = ds.counts().miss;
+  const hpBefore = ds.hp('kick');
+  eq('revive-tie: emptyBeat → onJudgment 返回 null', ds.onJudgment({ grade: 'MISS', rule: 'emptyBeat', penalizes: false, track: 'kick', isCore: false, actionMatch: false }), null);
+  eq('revive-tie: emptyBeat 不清连击', ds.counts().combo, comboBefore);
+  eq('revive-penalty: emptyBeat 不进 MISS 统计', ds.counts().miss, missBefore);
+  eq('revive-tie: emptyBeat 不改 hp', ds.hp('kick'), hpBefore);
+  eq('revive-tie: penalizes:false 也直通（新字段唯一口径，CR-08 #1）', ds.onJudgment(judg('kick', { grade: 'MISS', penalizes: false })), null);
+  eq('revive-tie: penalizes:false 的 MISS 不复活', ds.hp('kick'), hpBefore);
+
+  // ⑥ DIS-02 / JDG-07：非核心 PERFECT 与错动作都不涨不掉 hp
+  ds.reset();
+  eq('revive-tie: 非核心 PERFECT 不扣 hp', ds.onJudgment(judg('kick', { isCore: false })), null);
+  eq('revive-tie: 错动作 PERFECT 不扣 hp', ds.onJudgment(judg('kick', { actionMatch: false })), null);
+  eq('revive-tie: GOOD 不扣 hp', ds.onJudgment(judg('kick', { grade: 'GOOD' })), null);
+  eq('revive-tie: 以上三种都不写 hp', ds.hp('kick'), 4);
+  eq('revive-tie: 但 GOOD / 非核心 PERFECT 仍进连击与计数', `${ds.counts().good}/${ds.counts().perfect}/${ds.combo}`, '1/2/3');
+  eq('revive-tie: 核心命中率分子不含非核心', ds.coreHitRate(), 0);
+
+  // ⑦ 全拆完 → DISASSEMBLED；MISS 触发 DISASSEMBLED→PEAK 回退（世界重建）
+  ds.reset();
+  for (const t of ['kick', 'bass', 'synth']) for (let i = 0; i < 4; i += 1) ds.onJudgment(judg(t));
+  eq('revive-tie: 三轨全 0 → disassembled()', ds.disassembled(), true);
+  eq('revive-tie: 全拆完 → 状态 DISASSEMBLED', ds.state(), 'DISASSEMBLED');
+  const st = [];
+  ds.on('state-change', (p) => st.push(`${p.from}→${p.to}/${p.reason}`));
+  const pick3 = ds.onMiss({ atSec: clock.timeAtBeat(2) });
+  eq('revive-tie: DISASSEMBLED 下 MISS 复活 hp 最小者', pick3, 'kick');
+  eq('revive-tie: 复活触发唯一回退边 DISASSEMBLED→PEAK', ds.state(), 'PEAK');
+  eq('revive-tie: 回退边的 reason = revive', st.join('|'), 'DISASSEMBLED→PEAK/revive');
+  note('复活三口径（hp 最小者 / 并列 kick>bass>synth / 全满不改音频）+ 复活后 hp=1 + 只补当前拍之后，均已固化为断言');
+}
+
+/* ------------------------------------------------------------------ */
+/* case: silence — K-07 状态机（DIS-08）+ K-11 寂静段光点（DIS-07）        */
+/* ------------------------------------------------------------------ */
+
+async function caseSilence() {
+  const MC = await load('src/mocks/MockClock.js', 'silence');
+  const JS = await load('src/game/systems/JudgeSystem.js', 'silence');
+  const DS = await load('src/game/systems/DisassembleSystem.js', 'silence');
+  if (!MC || !JS || !DS) return;
+
+  const fwd = [
+    ['INTRO', 'BUILD'],
+    ['BUILD', 'PEAK'],
+    ['PEAK', 'DISASSEMBLED'],
+    ['DISASSEMBLED', 'SILENCE'],
+    ['SILENCE', 'RESULT'],
+    ['INTRO', 'RESULT']
+  ];
+  for (const [a, b] of fwd) ok(`silence: 合法迁移 ${a}→${b}`, DS.isLegalTransition(a, b) === true);
+  const bad = [
+    ['SILENCE', 'PEAK'],
+    ['SILENCE', 'BUILD'],
+    ['PEAK', 'BUILD'],
+    ['RESULT', 'INTRO'],
+    ['DISASSEMBLED', 'BUILD'],
+    ['INTRO', 'SILENCE'],
+    ['BUILD', 'SILENCE']
+  ];
+  for (const [a, b] of bad) ok(`silence: 非法迁移 ${a}→${b}`, DS.isLegalTransition(a, b) === false);
+  ok('silence: DISASSEMBLED→PEAK 只认 reason=revive（DIS-08 的唯一回退边）', DS.isLegalTransition('DISASSEMBLED', 'PEAK') === false && DS.isLegalTransition('DISASSEMBLED', 'PEAK', 'revive') === true);
+  ok('silence: 未知状态名一律 false', DS.isLegalTransition('INTRO', 'WAT') === false && DS.isLegalTransition('NOPE', 'BUILD') === false);
+  eq('silence: 六态清单与 C3 一致', JSON.stringify(DS.GAME_STATES), JSON.stringify(['INTRO', 'BUILD', 'PEAK', 'DISASSEMBLED', 'SILENCE', 'RESULT']));
+  eq('silence: 状态序 INTRO=0 … RESULT=5（只许向前的可断言口径）', DS.STATE_ORDER.RESULT - DS.STATE_ORDER.INTRO, 5);
+
+  const cfg = synthCfg({ freeOrder: true });
+  const clock = new MC.MockClock({ t: 0 });
+  clock.init({ bpm: cfg.bpm, sections: cfg.sections, introBeats: cfg.introBeats, lengthBeats: cfg.lengthBeats });
+  clock.start(0);
+  const events = new JS.EventLog();
+  const judge = JS.createJudgeSystem({ clock, events });
+  const ds = DS.createDisassembleSystem({ clock, events });
+  ds.load(cfg, { instances: synthInstances(clock, { kick: [8, 9, 10, 11], bass: [12, 13, 14, 15], synth: [16, 17, 18, 19] }) });
+  ds.bindJudge(judge);
+  const seen = [];
+  ds.on('state-change', (p) => seen.push(`${p.from}→${p.to}/${p.reason}`));
+  const revs = [];
+  ds.on('revive', (p) => revs.push(p));
+
+  throws('silence: transition() 对非法迁移抛 RangeError', () => ds.transition('SILENCE'), '非法迁移');
+  throws('silence: transition() 对未知状态名抛 RangeError', () => ds.transition('WAT'), '非法状态名');
+  eq('silence: 抛错后状态未被改写', ds.state(), 'INTRO');
+
+  ds.transition('BUILD', { reason: 'test' });
+  ds.transition('PEAK', { reason: 'test' });
+  for (const t of ['kick', 'bass', 'synth']) for (let i = 0; i < 4; i += 1) ds.onJudgment(judg(t));
+  eq('silence: 全拆 → DISASSEMBLED（自动，reason=disassemble）', ds.state(), 'DISASSEMBLED');
+  eq('silence: 段落提出的非法状态被忽略而非抛出', ds.acceptSectionState('PEAK', { reason: 'section' }), false);
+  eq('silence: 被忽略的提议记录在 lastIgnored', `${ds.lastIgnored.from}→${ds.lastIgnored.to}`, 'DISASSEMBLED→PEAK');
+  eq('silence: 忽略提议后状态不变', ds.state(), 'DISASSEMBLED');
+
+  const moved = ds.transition('SILENCE', { reason: 'silenceStart' });
+  eq('silence: DISASSEMBLED→SILENCE 合法', `${moved}/${ds.state()}`, 'true/SILENCE');
+  const dots = ds.silenceDots();
+  eq('silence: 光点数 = silenceBeats（8 拍逐拍）', dots.length, 8);
+  eq('silence: 光点起始拍 = ceil(lengthBeats - silenceBeats)', dots[0].beat, 56);
+  eq('silence: 光点终止拍 = lengthBeats-1', dots[dots.length - 1].beat, 63);
+  eq('silence: 光点初始态 lit', dots.every((d) => d.state === 'lit'), true);
+  eq('silence: 光点 timeSec 与 clock.timeAtBeat 同口径', dots[3].timeSec, clock.timeAtBeat(59));
+  const hpSnap = JSON.stringify(ds.hpByTrack());
+  const totalSnap = ds.total();
+
+  // DIS-07：段内光点 MISS 不复活任何声部
+  eq('silence: SILENCE 内 stompDot 在窗口外返回 null', ds.stompDot({ atSec: clock.timeAtBeat(56) - 0.5 }), null);
+  eq('silence: 窗口内踩灭 → stomped', ds.stompDot({ atSec: clock.timeAtBeat(56) + 0.001 })?.state, 'stomped');
+  eq('silence: 踩光点不改 hp', JSON.stringify(ds.hpByTrack()), hpSnap);
+  eq('silence: 踩光点不进分母', ds.total(), totalSnap);
+  eq('silence: 踩光点算连击', ds.combo > 0, true);
+
+  // 其余 7 个光点自然到期：逐 25ms 走完寂静段
+  const missBefore = ds.counts().miss;
+  clock.advanceTo(clock.timeAtBeat(64) + 0.6);
+  const final = ds.silenceDots();
+  eq('silence: 未踩的光点最终 expired（重亮只一拍）', final.filter((d) => d.state === 'expired').length, 7);
+  eq('silence: 每个到期光点只 MISS 一次', final.filter((d) => d.missed === 1).length, 7);
+  eq('silence: 段内 MISS 不复活任何声部（revive 事件 0，DIS-07）', revs.length, 0);
+  eq('silence: 段内 MISS 不改 hp', JSON.stringify(ds.hpByTrack()), hpSnap);
+  eq('silence: 段内 MISS 不回退状态（SILENCE→PEAK 非法）', ds.state(), 'SILENCE');
+  eq('silence: 光点 MISS 不进 §7.3 的 MISS 数', ds.counts().miss, missBefore);
+  eq('silence: 光点 MISS 另有计数（dotMiss）', ds.counts().dotMiss, 7);
+  eq('silence: Perfect 分母在寂静段后仍不变', ds.total(), totalSnap);
+  ds.transition('RESULT', { reason: 'timeUp' });
+  eq('silence: SILENCE→RESULT 合法', ds.state(), 'RESULT');
+  throws('silence: RESULT 是终态（再迁移一律抛）', () => ds.transition('PEAK'), '非法迁移');
+  eq('silence: 状态机轨迹', seen.join('|'), 'INTRO→BUILD/test|BUILD→PEAK/test|PEAK→DISASSEMBLED/disassemble|DISASSEMBLED→SILENCE/silenceStart|SILENCE→RESULT/timeUp');
+}
+
+/* ------------------------------------------------------------------ */
+/* case: actiontype — K-09 / JDG-07 错动作按 GOOD + JDG-08 同拍单输入      */
+/* ------------------------------------------------------------------ */
+
+async function caseActiontype() {
+  const MC = await load('src/mocks/MockClock.js', 'actiontype');
+  const JS = await load('src/game/systems/JudgeSystem.js', 'actiontype');
+  const DS = await load('src/game/systems/DisassembleSystem.js', 'actiontype');
+  if (!MC || !JS || !DS) return;
+
+  eq('actiontype: spike→jump', JS.expectedAction('spike'), 'jump');
+  eq('actiontype: platform→jump', JS.expectedAction('platform'), 'jump');
+  eq('actiontype: barrage→dash', JS.expectedAction('barrage'), 'dash');
+  eq('actiontype: 未知类型兜底 jump', JS.expectedAction('nope'), 'jump');
+
+  const cfg = synthCfg();
+  const clock = new MC.MockClock({ t: 0 });
+  clock.init({ bpm: cfg.bpm, sections: cfg.sections, introBeats: cfg.introBeats, lengthBeats: cfg.lengthBeats });
+  clock.start(0);
+  const inst = synthInstances(clock, { kick: [8, 20], bass: [8, 24], synth: [12, 28] });
+  const events = new JS.EventLog();
+  const judge = JS.createJudgeSystem({ clock, events });
+  const ds = DS.createDisassembleSystem({ clock, events });
+  ds.load(cfg, { instances: inst });
+  ds.bindJudge(judge);
+  judge.registerObstacles(inst);
+  const feed = [];
+  judge.onJudgment((j) => {
+    feed.push(j);
+    ds.onJudgment(j);
+  });
+  eq('actiontype: judgable:false 的 bed 不入队（本夹具无 bed）', `${judge.pendingCount()}/${inst.length}`, '6/6');
+
+  // JDG-07：错动作按 GOOD 通过，不涨不扣 hp
+  clock.advanceTo(clock.timeAtBeat(8) + 0.01);
+  const wrong = judge.onInput('dash', clock.timeAtBeat(8) + 0.01); // kick 期望 jump
+  eq('actiontype: 错动作 → GOOD', wrong.grade, 'GOOD');
+  eq('actiontype: 错动作 → actionMatch false', wrong.actionMatch, false);
+  eq('actiontype: 错动作仍算命中（rule window / penalizes true）', `${wrong.rule}/${wrong.penalizes}`, 'window/true');
+  eq('actiontype: 错动作不写 hp', ds.hp('kick'), 4);
+  eq('actiontype: 错动作不进 Perfect 计数', ds.counts().perfect, 0);
+  eq('actiontype: 错动作进 GOOD 计数', ds.counts().good, 1);
+  eq('actiontype: 错动作保留连击', ds.combo, 1);
+
+  // JDG-08：同拍的两个障碍，一次输入只消费一个
+  const beat8 = inst.filter((o) => o.beat === 8);
+  eq('actiontype: 夹具的拍 8 有 2 个障碍', beat8.length, 2);
+  const t8 = clock.timeAtBeat(8);
+  const a = judge.onInput('jump', t8 + 0.4);
+  const b = judge.onInput('jump', t8 + 0.42);
+  ok('actiontype: 第一次输入消费了某个障碍', !!a.obstacleId, JSON.stringify(a));
+  eq('actiontype: 同拍第二次输入不再消费（JDG-08）', b.obstacleId, null);
+  eq('actiontype: 同拍第二次输入按 emptyBeat 无惩罚呈现', `${b.rule}/${b.penalizes}`, 'emptyBeat/false');
+  eq('actiontype: 一次输入只吃掉一个 obstacle（待判定数 -1）', judge.pendingCount(), 4);
+  eq('actiontype: emptyBeat 不扣 hp（唯一过滤点在 DisassembleSystem）', ds.hp('bass'), 4);
+  eq('actiontype: emptyBeat 不清连击', ds.combo > 0, true);
+
+  // CR-08 #4：提前派发不得重复判定同一 obstacle
+  const target = inst.find((o) => o.beat === 20);
+  const due = target.timeSec + judge.windows().goodMs / 1000;
+  clock.advanceTo(due - 0.05); // 落在 120ms 提前窗口内 → 回调必须自检后重挂
+  eq('actiontype: 提前派发未把障碍判成 MISS', target.state, 'pending');
+  eq('actiontype: 提前派发未产生判定事件', feed.filter((j) => j.obstacleId === target.id).length, 0);
+  clock.advanceTo(due + 0.02);
+  eq('actiontype: 到点后恰好判定一次', feed.filter((j) => j.obstacleId === target.id).length, 1);
+  eq('actiontype: 到点后障碍转 expired', target.state, 'expired');
+  clock.advanceTo(due + 1.0);
+  eq('actiontype: 再推进不重复判定（提前触发不双判）', feed.filter((j) => j.obstacleId === target.id).length, 1);
+  eq('actiontype: 超时 MISS 走同一入口并触发复活（hp 最小者）', feed.filter((j) => j.obstacleId === target.id)[0].trigger, 'timeout');
+
+  // 空拍形状
+  const empty = judge.onInput('jump', clock.timeAtBeat(50));
+  eq('actiontype: 空拍形状', `${empty.grade}/${empty.rule}/${empty.trigger}/${empty.penalizes}/${empty.obstacleId}`, 'MISS/emptyBeat/input/false/null');
+  eq('actiontype: 空拍不改 hp 也不进 MISS 统计', `${ds.hp('kick')}/${ds.counts().miss}`, '4/0');
+  note('JDG-07（错动作按 GOOD、不涨不扣 hp）与 JDG-08（同拍单输入只消费一个）+ CR-08 #4（提前触发不双判）已固化');
+}
+
+/* ------------------------------------------------------------------ */
+/* case: freeorder — K-12 L6 自由顺序（拆解顺序无关）                     */
+/* ------------------------------------------------------------------ */
+
+async function caseFreeorder() {
+  const MC = await load('src/mocks/MockClock.js', 'freeorder');
+  const JS = await load('src/game/systems/JudgeSystem.js', 'freeorder');
+  const DS = await load('src/game/systems/DisassembleSystem.js', 'freeorder');
+  const PG = await load('src/game/systems/PatternGenerator.js', 'freeorder');
+  if (!MC || !JS || !DS || !PG) return;
+
+  const cfg = synthCfg({ freeOrder: true });
+  const clock = new MC.MockClock({ t: 0 });
+  clock.init({ bpm: cfg.bpm, sections: cfg.sections, introBeats: cfg.introBeats, lengthBeats: cfg.lengthBeats });
+  clock.start(0);
+  const mk = () => {
+    const dsx = DS.createDisassembleSystem({ clock, events: new JS.EventLog() });
+    dsx.load(cfg, { instances: synthInstances(clock, { kick: [8, 9, 10, 11], bass: [12, 13, 14, 15], synth: [16, 17, 18, 19] }) });
+    return dsx;
+  };
+  eq('freeorder: 配置 freeOrder:true → ds.freeOrder()', mk().freeOrder(), true);
+
+  const orderA = [];
+  const orderB = [];
+  const runA = mk();
+  const runB = mk();
+  for (const t of ['kick', 'bass', 'synth']) for (let i = 0; i < 4; i += 1) runA.onJudgment(judg(t));
+  for (const t of ['synth', 'bass', 'kick']) for (let i = 0; i < 4; i += 1) runB.onJudgment(judg(t));
+  orderA.push(runA.state());
+  orderB.push(runB.state());
+  eq('freeorder: 正序与倒序都抵达 disassembled()', `${runA.disassembled()}/${runB.disassembled()}`, 'true/true');
+  eq('freeorder: 倒序不影响 Perfect 率', `${runA.perfectRate()}/${runB.perfectRate()}`, '1/1');
+  eq('freeorder: 两序 hp 归零后的快照一致', JSON.stringify(runA.hpByTrack()), JSON.stringify(runB.hpByTrack()));
+  eq('freeorder: disassembledTracks() 始终按 kick/bass/synth 稳定序', JSON.stringify(runB.disassembledTracks()), '["kick","bass","synth"]');
+  eq('freeorder: 状态轨迹一致（与拆解顺序无关）', orderA.join('|'), orderB.join('|'));
+  eq('freeorder: 扣血次数 = 声部数 × 4', [runA, runB].every((x) => x.coreHitRate() === 1), true);
+
+  const part = mk();
+  for (const t of ['kick', 'bass']) for (let i = 0; i < 4; i += 1) part.onJudgment(judg(t));
+  eq('freeorder: 只拆两轨 → disassembled() false', part.disassembled(), false);
+  eq('freeorder: 未全拆 → 状态不进 DISASSEMBLED', part.state(), 'INTRO');
+  eq('freeorder: 已拆两轨仍如实上报', JSON.stringify(part.disassembledTracks()), '["kick","bass"]');
+
+  // 真 L6（SOUND 名下内容）：三轨齐备 + freeOrder
+  const l6 = readLevel(6);
+  if (!l6) {
+    skipCase('freeorder', 'src/data/levels/level6.json 尚不存在（SOUND 名下内容）');
+    return;
+  }
+  const rig = buildRig(PG, MC, JS, DS, l6);
+  eq('freeorder: L6 配置 freeOrder → ds.freeOrder()', rig.ds.freeOrder(), true);
+  eq('freeorder: L6 三轨都在（trackCount 3）', rig.ds.trackCount(), 3);
+  eq('freeorder: L6 三轨 hp 均为 4', JSON.stringify(rig.ds.hpByTrack()), '{"kick":4,"bass":4,"synth":4}');
+  eq('freeorder: L6 无 bed 参与拆解', rig.ds.activeTrack('bed'), false);
+  const check = PG.validateFreeOrder(l6, rig.instances);
+  eq('freeorder: L6 通过 SOUND 的 validateFreeOrder（只读调用）', JSON.stringify(check?.errors ?? []), '[]');
+  playRig(rig, { stomp: true });
+  eq('freeorder: L6 完美局 → 全拆 + Perfect 100%', `${rig.ds.disassembled()}/${rig.ds.perfectRate()}`, 'true/1');
+  eq('freeorder: L6 完美局评级 S', rig.ds.rank(), 'S');
+  eq('freeorder: L6 完美局无惩罚 MISS', rig.ds.counts().miss, 0);
+}
+
+function ds_free(ds) {
+  return ds.freeOrder();
+}
+
+/* ------------------------------------------------------------------ */
+/* case: integration — K-05 真谱面全事件流 + 重开基线 + L-07 窗口表        */
+/* ------------------------------------------------------------------ */
+
+async function caseIntegration() {
+  const MC = await load('src/mocks/MockClock.js', 'integration');
+  const JS = await load('src/game/systems/JudgeSystem.js', 'integration');
+  const DS = await load('src/game/systems/DisassembleSystem.js', 'integration');
+  const PG = await load('src/game/systems/PatternGenerator.js', 'integration');
+  const CFG = await load('src/data/config.js', 'integration');
+  if (!MC || !JS || !DS || !PG) return;
+
+  /* —— ① 真 L1 / L2：MockClock 逐帧跑完整事件流（数字固化成回归） —— */
+  const FROZEN_FLOW = {
+    1: { total: 55, core: 16, bed: 39, hpEvents: 4, disEvents: 1, dots: 8, states: 'INTRO→BUILD/section|BUILD→DISASSEMBLED/disassemble|DISASSEMBLED→SILENCE/silenceStart|SILENCE→RESULT/timeUp' },
+    2: { total: 56, core: 14, bed: 48, hpEvents: 8, disEvents: 2, dots: 12, states: 'INTRO→BUILD/section|BUILD→PEAK/section|PEAK→DISASSEMBLED/disassemble|DISASSEMBLED→SILENCE/silenceStart|SILENCE→RESULT/timeUp' }
+  };
+  for (const id of [1, 2]) {
+    const cfg = readLevel(id);
+    if (!cfg) {
+      skipCase('integration', `src/data/levels/level${id}.json 尚不存在（SOUND 名下内容）`);
+      continue;
+    }
+    const expect = FROZEN_FLOW[id];
+    const rig = buildRig(PG, MC, JS, DS, cfg);
+    rig.JS = JS;
+    playRig(rig, { stomp: true });
+    const tag = `L${id}`;
+
+    eq(`integration ${tag}: 分母 = 谱面可判定障碍数（固化）`, rig.ds.total(), expect.total);
+    eq(`integration ${tag}: 核心障碍数（固化）`, rig.ds.coreTotal(), expect.core);
+    eq(`integration ${tag}: bed 实例数（固化，且不进分母）`, rig.instances.length - expect.total, expect.bed);
+    eq(`integration ${tag}: bed 一律 judgable:false`, rig.instances.filter((o) => o.track === 'bed').every((o) => o.judgable === false), true);
+    eq(`integration ${tag}: JudgeSystem 跳过 bed 数（ignoredCount）`, rig.judge.ignoredCount(), expect.bed);
+    eq(`integration ${tag}: 判定流里没有 bed 障碍`, rig.feed.some((j) => j.track === 'bed' || j.obstacleId === null && j.rule === 'window'), false);
+    eq(`integration ${tag}: 每次输入都是窗口内 PERFECT`, rig.feed.every((j) => j.grade === 'PERFECT' && j.rule === 'window' && j.penalizes === true), true);
+    eq(`integration ${tag}: 输入数 = 分母`, rig.feed.length, expect.total);
+    eq(`integration ${tag}: Perfect 率 100% / 核心命中率 100%`, `${rig.ds.perfectRate()}/${rig.ds.coreHitRate()}`, '1/1');
+    eq(`integration ${tag}: 完美局评级 S`, rig.ds.rank(), 'S');
+    eq(`integration ${tag}: 完美局 0 惩罚 MISS`, rig.ds.counts().miss, 0);
+    eq(`integration ${tag}: 完美局光点全踩灭`, rig.ds.silenceDots().every((d) => d.state === 'stomped'), true);
+    eq(`integration ${tag}: 光点数 = silenceBeats`, rig.ds.silenceDots().length, expect.dots);
+    eq(`integration ${tag}: 状态轨迹（固化）`, rig.ev.filter((e) => e.name === 'state-change').map((e) => `${e.from}→${e.to}/${e.reason}`).join('|'), expect.states);
+    eq(`integration ${tag}: hp-change 事件数 = 总 hp 点数`, rig.ev.filter((e) => e.name === 'hp-change').length, expect.hpEvents);
+    eq(`integration ${tag}: disassemble 事件数 = 声部数`, rig.ev.filter((e) => e.name === 'disassemble').length, expect.disEvents);
+    eq(`integration ${tag}: 无复活事件（完美局）`, rig.ev.filter((e) => e.name === 'revive').length, 0);
+    eq(`integration ${tag}: hp-change 均先于同轨 disassemble`, (() => {
+      const seq = rig.ev.filter((e) => e.name === 'hp-change' || e.name === 'disassemble');
+      const lastHp = {};
+      for (const e of seq) {
+        if (e.name === 'hp-change') lastHp[e.track] = seq.indexOf(e);
+        else if (seq.findIndex((x) => x.name === 'disassemble' && x.track === e.track) < lastHp[e.track]) return false;
+      }
+      return true;
+    })(), true);
+    eq(`integration ${tag}: 终态 RESULT`, rig.ds.state(), 'RESULT');
+    eq(`integration ${tag}: 队列清空（detach 后无残留定时器）`, (rig.ds.detach(), rig.clock.queueSize()), 0);
+    eq(`integration ${tag}: C7 事件流有判定与 hp 记录`, rig.events.count() > expect.total, true);
+    eq(`integration ${tag}: 非法提议被忽略而非抛出（section 的 PEAK 在 DISASSEMBLED 之后）`, rig.ds.lastIgnored === null || rig.ds.lastIgnored.to !== undefined, true);
+  }
+
+  /* —— ② K-05 重开基线：20 次 R 之后队列 / 监听 / 分母 / 音频节点数回基线 —— */
+  const cfg1 = readLevel(1);
+  if (cfg1) {
+    const rig = buildRig(PG, MC, JS, DS, cfg1);
+    playRig(rig, { stomp: true });
+    rig.ds.detach();
+    const queueBase = rig.clock.queueSize();
+    const listenersBase = ['hp-change', 'disassemble', 'revive', 'state-change'].reduce((n, k) => n + rig.ds.listenerCount(k), 0);
+    const instanceBase = rig.instances.length;
+    let everyRestartIdentical = true;
+    for (let i = 0; i < 20; i += 1) {
+      rig.judge.reset();
+      rig.ds.reset();
+      rig.judge.registerObstacles(rig.instances);
+      rig.ds.attach();
+      playRig(rig, { stomp: true });
+      // 每一局重开都必须得到完全一样的判定数与分母（T6：重开不改变耐久统计口径）
+      if (rig.ds.counts().perfect !== 55 || rig.ds.total() !== 55 || rig.feed.length !== (i + 2) * 55) everyRestartIdentical = false;
+      rig.ds.detach();
+      rig.clock.stop();
+      rig.clock.start(0);
+    }
+    eq('integration: 20 次重开每一局判定数与分母都相同（无累积漂移）', everyRestartIdentical, true);
+    eq('integration: 20 次重开后 clock 队列回基线', rig.clock.queueSize(), queueBase);
+    eq('integration: 20 次重开后订阅数回基线', ['hp-change', 'disassemble', 'revive', 'state-change'].reduce((n, k) => n + rig.ds.listenerCount(k), 0), listenersBase);
+    rig.judge.reset();
+    rig.ds.reset();
+    eq('integration: 20 次重开后分母不变（§7.3）', rig.ds.total(), 55);
+    eq('integration: 20 次重开后 hp 回满（L1 只有鼓轨）', JSON.stringify(rig.ds.hpByTrack()), '{"kick":4,"bass":0,"synth":0}');
+    eq('integration: 20 次重开后状态回 INTRO', rig.ds.state(), 'INTRO');
+    eq('integration: 20 次重开后实例表长度不变（无泄漏）', rig.instances.length, instanceBase);
+    eq('integration: 20 次重开后待判定队列为空（未 register）', rig.judge.pendingCount(), 0);
+    ok('integration: lastHpWriter 只可能是 onJudgment/onMiss/null', ['onJudgment', 'onMiss', null].includes(rig.ds.lastHpWriter()), String(rig.ds.lastHpWriter()));
+
+    // 音频节点数基线（SOUND 名下 SoundEngine + 假 AudioContext）
+    const AUD = await load('tools/audioAssert.mjs', 'integration');
+    const SE = await load('src/audio/SoundEngine.js', 'integration');
+    if (AUD && SE) {
+      const ref = { t: 0 };
+      const fake = AUD.makeFakeContext({ currentTimeRef: ref });
+      const saved = globalThis.AudioContext;
+      globalThis.AudioContext = function FakeCtor() {
+        return fake;
+      };
+      try {
+        const engine = SE.createSoundEngine();
+        ok('integration: SoundEngine 用假 AudioContext 可 init', engine.init() === true && engine.ready === true);
+        engine.loadLevel(cfg1, rig.clock);
+        const nodeBase = fake.nodes.length;
+        const schedBase = engine.getStatus().events;
+        for (let i = 0; i < 20; i += 1) {
+          engine.loadLevel(cfg1, rig.clock);
+          engine.arm(0.35);
+          engine.silence('kick');
+          engine.revive('kick');
+          engine.applyHp('kick', 2, 4);
+          ref.t = 0.4;
+          engine.pump(0.4);
+          engine.stop();
+        }
+        eq('integration: 20 次重开后 Audio 节点数回基线（K-05 teardown 无泄漏）', fake.nodes.length, nodeBase);
+        eq('integration: 20 次重开后待发声表长度回基线', engine.getStatus().events, schedBase);
+        eq('integration: 音源指针归零（arm 后 sinceRestart）', engine.getStatus().loudnessDb !== undefined, true);
+      } finally {
+        if (saved === undefined) delete globalThis.AudioContext;
+        else globalThis.AudioContext = saved;
+      }
+    }
+  }
+
+  /* —— ③ L-07 六关窗口表 + 谱面硬约束 —— */
+  eq('integration: WINDOW_SCALES 表 = 1.2/1.1/1.0/1.0/0.95/0.95', JSON.stringify(CFG.WINDOW_SCALES), JSON.stringify([1.2, 1.1, 1, 1, 0.95, 0.95]));
+  const seenLevels = LEVEL_IDS.filter((id) => readLevel(id));
+  eq('integration: 六关 JSON 全部就位', seenLevels.length, 6);
+  for (const id of seenLevels) {
+    const cfg = readLevel(id);
+    eq(`integration: L${id} windowScale 与关卡表一致`, `${cfg.windowScale}/${CFG.windowScaleFor(id)}`, `${CFG.WINDOW_SCALES[id - 1]}/${CFG.WINDOW_SCALES[id - 1]}`);
+    ok(`integration: L${id} 至少一个可拆解声部`, ['kick', 'bass', 'synth'].some((t) => (cfg.tracks[t] || {}).hp > 0));
+    ok(`integration: L${id} bed 存在且 disassemble:false`, !!cfg.tracks.bed && cfg.tracks.bed.disassemble === false);
+    eq(`integration: L${id} silenceBeats>0（K-11 有光点段）`, cfg.silenceBeats > 0, true);
+    ok(`integration: L${id} sections 覆盖 SILENCE`, (cfg.sections || []).some((s) => s.state === 'SILENCE'));
+    // T8（leader 仲裁）：分母恒等式 = obstacleCount − bedCount
+    const r = buildRig(PG, MC, JS, DS, cfg);
+    const bed = r.instances.filter((o) => o.track === 'bed').length;
+    eq(`integration: L${id} T8 分母 = obstacleCount − bedCount`, r.ds.total(), r.instances.length - bed);
+    eq(`integration: L${id} bed 一律 judgable:false（CR-09）`, r.instances.filter((o) => o.track === 'bed').every((o) => o.judgable === false), true);
+    eq(`integration: L${id} 分母只数 judgable!==false`, r.ds.total(), r.instances.filter((o) => o.judgable !== false).length);
+    eq(`integration: L${id} bed 不进分母也不进核心数`, r.ds.coreTotal() <= r.ds.total(), true);
+    eq(`integration: L${id} Judge 不入队 bed（ignoredCount = bed 数）`, r.judge.ignoredCount(), bed);
+  }
+  const rig = buildRig(PG, MC, JS, DS, readLevel(6));
+  rig.JS = JS;
+  const w = rig.judge.windows();
+  ok('integration: L6 窗口仍守住下限（PERFECT≥40ms / GOOD≥80ms）', w.perfectMs >= 40 && w.goodMs >= 80, `${w.perfectMs}/${w.goodMs}`);
+  eq('integration: L6 窗口随 windowScale 收窄（比 L1 紧）', (() => {
+    const r1 = buildRig(PG, MC, JS, DS, readLevel(1));
+    return r1.judge.windows().perfectMs > w.perfectMs;
+  })(), true);
+  note('集成回归：L1/L2 的完整事件流数字（分母/核心数/bed 数/状态轨迹/事件数）已固化；20 次重开的 clock 队列、订阅数与音频节点数均回基线。');
+}
+
+/* ------------------------------------------------------------------ */
 /* 入口                                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -1139,7 +1811,12 @@ const CASES = [
   ['save', caseSave],
   ['eventlog', caseEventLog],
   ['debug', caseDebug],
-  ['forbid-clock', caseForbidClock]
+  ['forbid-clock', caseForbidClock],
+  ['revive-tie', caseReviveTie],
+  ['silence', caseSilence],
+  ['actiontype', caseActiontype],
+  ['freeorder', caseFreeorder],
+  ['integration', caseIntegration]
 ];
 
 function parseArgs(argv) {

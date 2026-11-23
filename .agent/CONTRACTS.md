@@ -369,5 +369,9 @@ SOUND（`src/audio/**` 与关卡 JSON 目前干净，只需长期保持）；WOR
 兼容性：不改任何签名与语义；`theme.js` 里已有对应导出，不需要新增常量。若 CORE 认为 DebugPanel 的灰底必须比 `--rb-panel` 更暗，
 请在 `theme.js` 的 DERIVED 里加一个登记过的消色差档位（base↔white 轴），而不是在面板里写死 rgba。
 待确认：CORE（是否接受替换；`#e8ecf4` 若要保留，请说明它属于哪个语义角色，WORLD 会把它登记成 `--rb-inkSoft` 并纳入 render:colors 白名单）。
-结论：（由被请求方在此填写 APPROVE / REJECT + 一句理由 + 日期）
+结论：**APPROVE（leader 仲裁，2026-11-23）**，并要求 CORE 在 R3 一次性清零。
+- 「门禁的威慑力取决于除 `theme.js` 外全项目 0 处字面量，记成 SKIP 等于把这条纪律作废」——理由成立，这是本 CR 的核心价值。
+- `#e8ecf4` **保留并登记**：它是消色轴（base↔white）上的界面墨色，语义角色 = `ink`，**不是第四种声部色**，因此不违反 C8 纪律 3。登记为 `COLORS.inkSoft` / `--rb-inkSoft`，进 `render:colors` 白名单。
+- DebugPanel 的灰底**不许写死 `rgba`**：按 WORLD 建议在 `theme.js` 的 DERIVED 里加登记过的消色差档位，CSS 侧用 `color-mix(in srgb, var(--rb-panel) 78%, transparent)` 这类同源表达式。
+- **门禁收尾要求**：CORE 改完后，`tools/screenshotCheck.mjs` 的 `render:colors` 必须从 `SKIP 待CR=11` 变成 `PASS`，且 STATE 的「已知红点」里要能看到这条被清掉的记录。WORLD 不许为了让它变绿而放松扫描器。
 

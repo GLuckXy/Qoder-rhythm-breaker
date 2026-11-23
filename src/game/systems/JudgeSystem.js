@@ -8,6 +8,14 @@
 //   ③ 其余 → 空拍（rule:'emptyBeat'）：无惩罚、不入耐久统计、不发 judge 事件，只发 input(hasTarget:false)
 // 超时 MISS 由 BeatClock.schedule 在 obstacleT + goodWindow 处驱动，与玩家输入无关（JDG-05）。
 //
+// K-09 增补（R2）：
+//   · JDG-07 动作类型校验：Spike/Platform 只接受 jump、Barrage 只接受 dash；用错动作**降为 GOOD**
+//     （既不算 PERFECT、也不算 MISS），并在 Judgment 里带 `actionMatch:false` —— 不涨 hp 也不扣 hp
+//     由 DisassembleSystem 唯一的写入口按这条分支执行（本文件不改 hp）。
+//   · JDG-08 同拍单消费：一次 onInput 最多消费一个 obstacle；并且**同一 beat 只允许一次输入被消费**
+//     （`_beatConsumed`）。第二次同拍输入找不到可消费目标 → 走 ②/③ → 通常落成 emptyBeat（无惩罚）。
+//     超时 MISS 不占用该名额（它不是输入）。
+//
 // 关于 emptyBeat 的 grade：C2 的 grade 枚举里没有「无判定」这一值，因此空拍返回
 // grade:'MISS' + rule:'emptyBeat' + obstacleId:null。**消费方（DisassembleSystem / HUD）
 // 必须先判 rule === 'emptyBeat' 再决定是否按 MISS 处理**，否则会把无惩罚空拍算成掉血。
@@ -99,6 +107,8 @@ export class JudgeSystemCore {
     this._lo = 0;
     this._lastLandSec = Number.NaN;
     this._listeners = [];
+    /** JDG-08：同一拍最多 1 次输入被消费。已消费的 beat 集合（超时 MISS 不计入）。 */
+    this._beatConsumed = new Set();
   }
 
   /**
@@ -180,6 +190,7 @@ export class JudgeSystemCore {
     this._ignored = 0;
     this._lo = 0;
     this._lastLandSec = Number.NaN;
+    this._beatConsumed.clear();
     this._log?.clear();
   }
 
@@ -212,7 +223,8 @@ export class JudgeSystemCore {
     this._obstacles = judgable.sort((a, b) => a.timeSec - b.timeSec);
     this._lo = 0;
     this._lastLandSec = Number.NaN;
-    for (const o of this._obstacles) if (o.state === 'pending') this._arm(o);
+    this._beatConsumed.clear();
+    for (const o of this._obstacles) if (this._live(o)) this._arm(o);
     return this._obstacles;
   }
 
@@ -221,16 +233,25 @@ export class JudgeSystemCore {
     return this._ignored || 0;
   }
 
-  /** 待判定（pending）障碍数，DebugPanel 用。 */
+  /** 待判定（pending / revived）障碍数，DebugPanel 用。 */
   pendingCount() {
     let n = 0;
-    for (const o of this._obstacles) if (o.state === 'pending') n += 1;
+    for (const o of this._obstacles) if (this._live(o)) n += 1;
     return n;
   }
 
   /** 只读快照（DebugPanel / selftest）。 */
   pendingList() {
-    return this._obstacles.filter((o) => o.state === 'pending').map((o) => ({ ...o }));
+    return this._obstacles.filter((o) => this._live(o)).map((o) => ({ ...o }));
+  }
+
+  /**
+   * 队列意义上的「活着」（DIS-05）：`pending` 与 `revived` 都可判定。
+   * 复活的表达是生成侧下发**新实例**（state:'revived'，见 WORLD 的 Obstacle.LEGAL_TRANSITIONS），
+   * 所以超时 MISS 与窗口匹配都必须接受 revived，否则复活后的障碍永不判定。
+   */
+  _live(o) {
+    return o.state === 'pending' || o.state === 'revived';
   }
 
   /* ---- 判定 ---- */
@@ -258,7 +279,8 @@ export class JudgeSystemCore {
     for (let i = this._lo; i < this._obstacles.length; i += 1) {
       const o = this._obstacles[i];
       if (o.timeSec - inputSec > goodSec) break;
-      if (o.state !== 'pending') continue;
+      if (!this._live(o)) continue;
+      if (this._beatConsumed.has(o.beat)) continue; // JDG-08：同一拍最多 1 次输入被消费
       const d = inputSec - o.timeSec;
       const abs = Math.abs(d);
       if (abs <= goodSec && abs < bestAbs) {
@@ -313,7 +335,8 @@ export class JudgeSystemCore {
       rule: 'emptyBeat',
       trigger: 'input',
       key: keyId,
-      penalizes: false
+      penalizes: false,
+      atSec: t
     };
   }
 
@@ -322,6 +345,7 @@ export class JudgeSystemCore {
   _consume(o, { grade, rule, keyId, actionMatch, atSec, inputSec }) {
     o.state = 'judged';
     o.grade = grade;
+    this._beatConsumed.add(o.beat); // JDG-08：本拍的输入名额已用掉（仅输入路径会走到这里）
     const deltaMs = Math.round((inputSec - o.timeSec) * 1000);
     this._lastLandSec = o.timeSec + this._arcSec(o);
     const judgment = {
@@ -335,7 +359,8 @@ export class JudgeSystemCore {
       rule,
       trigger: 'input',
       key: keyId,
-      penalizes: true
+      penalizes: true,
+      atSec // WORLD 的 Obstacle.onJudgment 用它记 judgedAtSec（纯新增字段，见 R2-CORE 的 CR 说明）
     };
     this._log?.judge({ t: atSec, grade, id: o.id, deltaMs, rule });
     return this._notify(judgment);
@@ -353,14 +378,14 @@ export class JudgeSystemCore {
   }
 
   _skipConsumed() {
-    while (this._lo < this._obstacles.length && this._obstacles[this._lo].state !== 'pending') this._lo += 1;
+    while (this._lo < this._obstacles.length && !this._live(this._obstacles[this._lo])) this._lo += 1;
   }
 
   _nextPendingAfter(inputSec) {
     this._skipConsumed();
     for (let i = this._lo; i < this._obstacles.length; i += 1) {
       const o = this._obstacles[i];
-      if (o.state === 'pending' && o.timeSec > inputSec) return o;
+      if (this._live(o) && o.timeSec > inputSec && !this._beatConsumed.has(o.beat)) return o;
     }
     return null;
   }
@@ -369,7 +394,7 @@ export class JudgeSystemCore {
     let best = null;
     let bestAbs = Infinity;
     for (const o of this._obstacles) {
-      if (o.state !== 'pending') continue;
+      if (!this._live(o)) continue;
       const abs = Math.abs(o.timeSec - inputSec);
       if (abs < bestAbs) {
         best = o;
@@ -387,11 +412,11 @@ export class JudgeSystemCore {
   }
 
   _rearmPending() {
-    for (const o of this._obstacles) if (o.state === 'pending') this._arm(o);
+    for (const o of this._obstacles) if (this._live(o)) this._arm(o);
   }
 
   _onTimeout(o) {
-    if (o.state !== 'pending') return;
+    if (!this._live(o)) return;
     const due = o.timeSec + this._win.goodMs / 1000;
     const nowSec = this._clock.now();
     if (nowSec < due - 0.002) {
@@ -412,7 +437,8 @@ export class JudgeSystemCore {
       rule: 'window',
       trigger: 'timeout',
       key: null,
-      penalizes: true
+      penalizes: true,
+      atSec: nowSec
     };
     this._log?.judge({ t: nowSec, grade: 'MISS', id: o.id, deltaMs: judgment.deltaMs, rule: 'window' });
     this._notify(judgment);

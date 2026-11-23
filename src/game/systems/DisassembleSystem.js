@@ -1,0 +1,644 @@
+// src/game/systems/DisassembleSystem.js — Owner: CORE（K-07 + K-11 + K-12，C3 冻结契约）
+// 职责：hp 的唯一写入口、复活选择（DIS-03/05/07）、拆解判定、状态机迁移（DIS-08）、
+//       Perfect 率分母（§7.3 固定分母）、寂静段光点（K-11）、L6 freeOrder（K-12）。
+// 明确不负责：音频（SOUND 订阅本文件的 'hp-change'/'disassemble'/'revive'）、画面（WORLD 同理）、
+//       窗口匹配（JudgeSystem）。**三方单向流：input → Judge → Disassemble → 事件广播**。
+//
+// C3 冻结签名：hp(track) / onJudgment(judgment) / onMiss() / disassembled()
+// 事件：'hp-change'{track,hp} | 'disassemble'{track} | 'revive'{track,ids} | 'state-change'{from,to,reason}
+//
+// 三条硬口径（CR-08 批复 + CR-09/CR-10 批复）：
+//   1) emptyBeat 的过滤**只在本入口**做一次：`rule==='emptyBeat'` 或 `penalizes===false` 直通、不扣血；
+//      HUD / ReplayAssembler 一律用 `penalizes` 字段过滤，不许再各写一份「算不算 MISS」。
+//   2) 分流判据唯一化：只看 `judgable` 布尔，**禁止**用 `track==='bed'` / `type==='bed'` 猜；
+//      `tracks.bed` 一律忽略（读 `disassemble:false`，不猜 `hp===0`）。
+//   3) 分母 = 本关 build() 出的可判定障碍总数，固定；复活、重开、跳过都不改它（§7.3 / DIS-05）。
+
+import { BeatClock } from '../../audio/BeatClock.js';
+import { FROZEN } from '../../data/physics.js';
+import { EventLog } from './JudgeSystem.js';
+
+/** 可拆解声部（C3 的三轨）。`bed` 不在内：CR-10 批复「永远不参与 hp / 拆解 / 分母」。 */
+export const DIS_TRACKS = Object.freeze(['kick', 'bass', 'synth']);
+/** DIS-03 并列口径：kick > bass > synth。 */
+export const REVIVE_PRIORITY = Object.freeze(['kick', 'bass', 'synth']);
+export const HP_MAX_DEFAULT = 4;
+/** 复活后的 hp 值（DIS-05：是 1，不是 4）。 */
+export const REVIVE_HP = 1;
+
+export const GAME_STATES = Object.freeze(['INTRO', 'BUILD', 'PEAK', 'DISASSEMBLED', 'SILENCE', 'RESULT']);
+/** DIS-08「只许向前」的量化口径；唯一的回退边是 revive 触发的 DISASSEMBLED→PEAK。 */
+export const STATE_ORDER = Object.freeze({ INTRO: 0, BUILD: 1, PEAK: 2, DISASSEMBLED: 3, SILENCE: 4, RESULT: 5 });
+
+/**
+ * DIS-08 的合法迁移表。
+ * · 只许向前（内容可以提前把关卡推进到 DISASSEMBLED，所以 INTRO/BUILD/PEAK 都可直接到 DISASSEMBLED）。
+ * · 唯一向后的回退边 = `DISASSEMBLED → PEAK`，且**必须** reason==='revive'（DIS-03 真的有人复活了）。
+ * · `SILENCE → PEAK` 非法（DIS-07：段内 MISS 不复活，否则出现「全拆完又退回 PEAK」的空洞回退）。
+ * · `RESULT` 是终态，重开走 reset() 而不是迁移。
+ */
+export const LEGAL_TRANSITIONS = Object.freeze({
+  INTRO: Object.freeze(['BUILD', 'DISASSEMBLED', 'RESULT']),
+  BUILD: Object.freeze(['PEAK', 'DISASSEMBLED', 'RESULT']),
+  PEAK: Object.freeze(['DISASSEMBLED', 'RESULT']),
+  DISASSEMBLED: Object.freeze(['SILENCE', 'PEAK', 'RESULT']),
+  SILENCE: Object.freeze(['RESULT']),
+  RESULT: Object.freeze([])
+});
+
+/** 供 contractTest 与 DebugPanel 使用的纯函数。 */
+export function isLegalTransition(from, to, reason = null) {
+  if (!GAME_STATES.includes(from) || !GAME_STATES.includes(to)) return false;
+  if (!(LEGAL_TRANSITIONS[from] || []).includes(to)) return false;
+  if (from === 'DISASSEMBLED' && to === 'PEAK') return reason === 'revive';
+  // DIS-08「只许向前」的第二重保险：表内若有回退边，也必须给出 reason==='revive'
+  if (STATE_ORDER[to] < STATE_ORDER[from] && reason !== 'revive') return false;
+  return true;
+}
+
+/** C5 的 silenceStartBeat（SOUND 名下函数的口径，这里只做等价兜底）。 */
+function silenceStartBeatOf(cfg) {
+  const len = Number(cfg && cfg.lengthBeats) || 0;
+  return len - (Number(cfg && cfg.silenceBeats) || 0);
+}
+
+export class DisassembleSystemCore {
+  /**
+   * @param {{clock?:object, events?:EventLog, levelCfg?:object}} [deps]
+   */
+  constructor(deps = {}) {
+    this._clock = deps.clock || BeatClock;
+    this.events = deps.events instanceof EventLog ? deps.events : deps.events || null;
+    this.cfg = deps.levelCfg || null;
+    this._subs = { 'hp-change': [], disassemble: [], revive: [], 'state-change': [] };
+    this._hp = { kick: 0, bass: 0, synth: 0 };
+    this._hpMax = { kick: 0, bass: 0, synth: 0 };
+    this._activeTrack = { kick: false, bass: false, synth: false };
+    this._state = 'INTRO';
+    this._pool = [];
+    this._retired = new Set();
+    this._extra = [];
+    this._seq = { kick: 0, bass: 0, synth: 0 };
+    this._denominator = 0;
+    this._coreTotal = 0;
+    this._n = { perfect: 0, corePerfect: 0, good: 0, miss: 0, dotMiss: 0 };
+    this.combo = 0;
+    this.maxCombo = 0;
+    this._invulnUntil = Number.NEGATIVE_INFINITY;
+    this._disassembleBeat = { kick: null, bass: null, synth: null };
+    this.dots = [];
+    this.lastIgnored = null;
+    this._unsubs = [];
+    this._freeOrder = false;
+    this._hpWrittenBy = null;
+  }
+
+  /* ---------------- 装载 / 重开 ---------------- */
+
+  /**
+   * C5 关卡配置 → hp 初值、段落口径、寂静段光点表。
+   * `tracks.bed` 与 `disassemble:false` 的声部被忽略；`hp:0` 表示该关没有这个声部（DIS-01）。
+   * @param {object} levelCfg
+   * @param {{instances?:object[]}} [opts]
+   */
+  load(levelCfg, opts = {}) {
+    this.cfg = levelCfg || {};
+    this._freeOrder = !!(this.cfg && this.cfg.freeOrder === true);
+    for (const t of DIS_TRACKS) {
+      const tr = (this.cfg.tracks || {})[t];
+      const dis = tr ? tr.disassemble !== false : false;
+      const hpMax = tr && Number.isFinite(tr.hp) ? Math.max(0, Math.round(tr.hp)) : 0;
+      this._hpMax[t] = hpMax;
+      this._hp[t] = hpMax;
+      this._activeTrack[t] = dis && hpMax > 0;
+      this._disassembleBeat[t] = null;
+    }
+    if (Array.isArray(opts.instances)) this.setInstances(opts.instances);
+    this.dots = this._buildDots();
+    this._state = 'INTRO';
+    return this;
+  }
+
+  /**
+   * C4 实例表（build() 的输出，可含 bed）。**分母在这里定死**。
+   * 判据唯一：`judgable === false` 的一律不是玩家对象（CR-09 批复）。
+   */
+  setInstances(instances) {
+    const pool = (Array.isArray(instances) ? instances : []).filter((o) => o && o.judgable !== false);
+    this._pool = pool;
+    this._denominator = pool.length;
+    this._coreTotal = pool.filter((o) => o.core === true).length;
+    this._retired.clear();
+    this._extra = [];
+    for (const t of DIS_TRACKS) this._seq[t] = 0;
+    return this;
+  }
+
+  /** 本局重开（R）：hp / 计数 / 队列回基线，**分母不变**（§7.3 T6 用例）。 */
+  reset() {
+    for (const t of DIS_TRACKS) {
+      this._hp[t] = this._hpMax[t];
+      this._disassembleBeat[t] = null;
+    }
+    this._retired.clear();
+    this._extra = [];
+    for (const t of DIS_TRACKS) this._seq[t] = 0;
+    this._n = { perfect: 0, corePerfect: 0, good: 0, miss: 0, dotMiss: 0 };
+    this.combo = 0;
+    this.maxCombo = 0;
+    this._invulnUntil = Number.NEGATIVE_INFINITY;
+    this._state = 'INTRO';
+    this.dots = this._buildDots();
+    this.lastIgnored = null;
+    return this;
+  }
+
+  /* ---------------- C3 签名 ---------------- */
+
+  /** C3：0..4；配置里 hp:0 表示该关无此声部；`bed` 恒为 0（且不参与任何拆解）。 */
+  hp(track) {
+    if (!DIS_TRACKS.includes(track)) return 0;
+    return this._hp[track];
+  }
+
+  hpMax(track) {
+    if (!DIS_TRACKS.includes(track)) return 0;
+    return this._hpMax[track];
+  }
+
+  /** 只读快照（HUD / WorldLayer 的 hpByTrack / 引擎 applyHp 用）。 */
+  hpByTrack() {
+    return { kick: this._hp.kick, bass: this._hp.bass, synth: this._hp.synth };
+  }
+
+  /** DIS-06：本关所有**存在的**声部都 hp=0。 */
+  disassembled() {
+    const live = DIS_TRACKS.filter((t) => this._activeTrack[t]);
+    if (!live.length) return false;
+    return live.every((t) => this._hp[t] === 0);
+  }
+
+  disassembledTracks() {
+    return DIS_TRACKS.filter((t) => this._activeTrack[t] && this._hp[t] === 0);
+  }
+
+  activeTrack(track) {
+    return this._activeTrack[track] === true;
+  }
+
+  /** 本关声部数（结算与 freeOrder 断言用）。 */
+  trackCount() {
+    return DIS_TRACKS.filter((t) => this._activeTrack[t]).length;
+  }
+
+  freeOrder() {
+    return this._freeOrder;
+  }
+
+  /** §7.3 的固定分母。 */
+  total() {
+    return this._denominator;
+  }
+
+  coreTotal() {
+    return this._coreTotal;
+  }
+
+  /**
+   * ★ C3：hp 的**唯一**写入口。
+   * 扣血条件四条全中才扣：`activeTrack && isCore && grade==='PERFECT' && actionMatch`
+   * 且**先**排除 emptyBeat / penalizes:false（CR-08 批复第 1 点，过滤只在这里做一次）。
+   * @param {object} j Judgment（C2）
+   * @returns {object|null} 本次影响 `{track, hp, kind}`；无影响返回 null
+   */
+  onJudgment(j) {
+    if (!j || typeof j !== 'object') return null;
+    // ① 无惩罚空拍：不扣血、不清连击、不进耐久统计（JDG-04 ③）
+    if (j.rule === 'emptyBeat' || j.penalizes === false) return null;
+    const nowSec = this._clock.now();
+    if (j.grade === 'MISS') {
+      const hit = this.onMiss({ atSec: nowSec, track: j.track, obstacleId: j.obstacleId });
+      return hit ? { track: hit, hp: this._hp[hit], kind: 'revive' } : { track: null, hp: null, kind: 'miss' };
+    }
+    if (j.grade === 'GOOD') {
+      this._bumpCombo();
+      this._n.good += 1;
+      return null;
+    }
+    // PERFECT
+    this._bumpCombo();
+    this._n.perfect += 1;
+    const track = j.track;
+    if (!DIS_TRACKS.includes(track) || this._activeTrack[track] !== true) return null;
+    if (!j.isCore || !j.actionMatch) return null; // DIS-02：非核心 PERFECT 不涨拆解进度
+    // 核心命中率的分子：命中即计，与「该声部 hp 是否已经见底」无关（否则满分的核心命中率只有 4/16）
+    this._n.corePerfect += 1;
+    if (this._hp[track] <= 0) return null; // 已拆解声部不再扣（停止生成后仍可能有漏网实例）
+    this._hp[track] -= 1;
+    this._hpWrittenBy = 'onJudgment';
+    this._emit('hp-change', { track, hp: this._hp[track] }, nowSec);
+    let out = { track, hp: this._hp[track], kind: 'hp' };
+    if (this._hp[track] === 0) {
+      this._disassembleBeat[track] = this._clock.beatAt(nowSec);
+      this._retireTrack(track);
+      this._emit('disassemble', { track, beat: this._disassembleBeat[track], ids: this._retiredIdsOf(track) }, nowSec);
+      this._enterDisassembled(nowSec);
+      out = { track, hp: 0, kind: 'disassemble' };
+    }
+    return out;
+  }
+
+  /**
+   * DIS-03 复活选择（C3 签名 `onMiss()`，可选参数仅为归因，不影响口径）：
+   *   · 清连击 + 起无敌帧（§7.2）
+   *   · SILENCE 段内 → **不复活任何声部**（DIS-07），返回 null
+   *   · 全部在场声部都在满 hp → 不改音频、不复活（DIS-03 第三条「全 hp=4」口径），返回 null
+   *   · 否则取 hp 最小者（PRD 原文「损失点数最多」＝hp 最小且 ≥0）；并列按 kick > bass > synth；hp → REVIVE_HP(=1)
+   * @returns {string|null} 受影响 track
+   */
+  onMiss(opt = {}) {
+    if (opt.source !== 'silenceDot') this._n.miss += 1; // §7.3 的 MISS 数只统计谱面障碍；光点另计 _n.dotMiss
+    else this._n.dotMiss += 1;
+    this.combo = 0;
+    const atSec = Number.isFinite(opt.atSec) ? opt.atSec : this._clock.now();
+    this._invulnUntil = atSec + FROZEN.invulnSec;
+    if (this._state === 'SILENCE') return null; // DIS-07：段内光点 MISS 不复活
+    const live = DIS_TRACKS.filter((t) => this._activeTrack[t]);
+    if (!live.length) return null;
+    if (live.every((t) => this._hp[t] === this._hpMax[t])) return null; // 全满 → 仅清连击，不改音频
+    const minHp = Math.min(...live.map((t) => this._hp[t]));
+    const pick = REVIVE_PRIORITY.find((t) => this._hp[t] === minHp);
+    if (!pick) return null;
+    if (this._hp[pick] !== REVIVE_HP) {
+      this._hp[pick] = REVIVE_HP;
+      this._hpWrittenBy = 'onMiss';
+      this._emit('hp-change', { track: pick, hp: REVIVE_HP, reason: 'revive' }, atSec);
+    }
+    const ids = this._regenerate(pick, atSec);
+    this._emit('revive', { track: pick, hp: REVIVE_HP, ids, from: 'revive' }, atSec);
+    if (this._state === 'DISASSEMBLED') {
+      // DIS-08 的回退边：这就是「世界重建」事件（WORLD 收到 state-change reason:'revive' + revive ids）
+      this.transition('PEAK', { reason: 'revive', atSec });
+    }
+    return pick;
+  }
+
+  /* ---------------- 状态机（DIS-08） ---------------- */
+
+  state() {
+    return this._state;
+  }
+
+  /** 关卡时间轴上的先后级（INTRO=0…RESULT=5；未知名 -1）。DIS-08「只许向前」的可断言口径。 */
+  stateIndex(name = this._state) {
+    return Number.isInteger(STATE_ORDER[name]) ? STATE_ORDER[name] : -1;
+  }
+
+  /**
+   * 显式迁移。**非法迁移抛 RangeError**（DIS-08 的「debug 面板报错」由此驱动）。
+   * @param {string} to
+   * @param {{reason?:string, atSec?:number, mirror?:boolean}} [opt]
+   */
+  transition(to, opt = {}) {
+    const reason = opt.reason || 'manual';
+    if (!GAME_STATES.includes(to)) {
+      throw new RangeError(`[DisassembleSystem] 非法状态名 ${to}，合法值：${GAME_STATES.join('|')}`);
+    }
+    const from = this._state;
+    if (from === to) return false;
+    if (!isLegalTransition(from, to, reason)) {
+      throw new RangeError(`[DisassembleSystem] 非法迁移 ${from} → ${to}（reason=${reason}）`);
+    }
+    this._state = to;
+    const atSec = Number.isFinite(opt.atSec) ? opt.atSec : this._clock.now();
+    this._emit('state-change', { from, to, reason, beat: this._clock.beatAt(atSec) }, atSec);
+    if (opt.mirror !== false && typeof this._clock.setState === 'function' && this._clock.getState && this._clock.getState() !== to) {
+      try {
+        this._clock.setState(to);
+      } catch {
+        /* 时钟侧只做名字校验；镜像失败不影响本文件权威 */
+      }
+    }
+    if (to === 'SILENCE') this._scheduleDots();
+    return true;
+  }
+
+  /**
+   * 内容（C5 sections）提出的状态：只在合法时才采纳，非法（如已 DISASSEMBLED 后 section 又写 PEAK）
+   * 记入 lastIgnored 并**忽略**，不抛——否则 L1 在 beat 10 拆完鼓后、beat 20 的 PEAK 段落会炸掉整局。
+   * 需要「必须报错」语义的调用方请用 transition()。
+   */
+  acceptSectionState(next, opt = {}) {
+    if (!next || !GAME_STATES.includes(next)) return false;
+    if (next === this._state) return false; // 段落写回同一状态是常态（连续多段 PEAK），不算「被忽略」
+    if (isLegalTransition(this._state, next, opt.reason || 'section')) return this.transition(next, opt);
+    this.lastIgnored = { from: this._state, to: next, reason: opt.reason || 'section', atSec: opt.atSec ?? null };
+    return false;
+  }
+
+  /** 订阅时钟（段落驱动 + 关卡终点）。返回退订函数（K-05 teardown 登记项）。 */
+  attach() {
+    this.detach();
+    const off = this._clock.onEvent((ev) => this._onClockEvent(ev));
+    this._unsubs.push(off);
+    const len = Number(this.cfg && this.cfg.lengthBeats) || 0;
+    if (len > 0) {
+      const at = this._clock.timeAtBeat(len);
+      this._unsubs.push(this._clock.schedule(() => this._finalize({ atSec: at }), at));
+    }
+    return this;
+  }
+
+  detach() {
+    while (this._unsubs.length) {
+      const fn = this._unsubs.pop();
+      try {
+        fn();
+      } catch {
+        /* 退订失败不阻断 teardown */
+      }
+    }
+    return this;
+  }
+
+  _onClockEvent(ev) {
+    if (!ev) return;
+    if (ev.type === 'section' && ev.state) {
+      this.acceptSectionState(ev.state, { reason: 'section', atSec: ev.timeSec });
+      // 段落已写 SILENCE 但 hp 还没全 0 → 上面的 accept 会忽略（关卡时间耗尽时由 _finalize 收口）
+    }
+    if (ev.type === 'beat' && this._state === 'DISASSEMBLED' && ev.beat >= silenceStartBeatOf(this.cfg) - 1e-9) {
+      this.transition('SILENCE', { reason: 'silenceStart', atSec: ev.timeSec });
+    }
+  }
+
+  _enterDisassembled(atSec) {
+    if (this._state === 'RESULT') return;
+    if (!this.disassembled()) return;
+    if (!isLegalTransition(this._state, 'DISASSEMBLED', 'disassemble')) return;
+    this.transition('DISASSEMBLED', { reason: 'disassemble', atSec });
+  }
+
+  _finalize(opt = {}) {
+    const atSec = Number.isFinite(opt.atSec) ? opt.atSec : this._clock.now();
+    if (this._state === 'RESULT') return false;
+    // 关卡时间耗尽：无论停在哪个段落都要收口到 RESULT（未到 SILENCE 的按「向前」迁移处理）
+    this.transition('RESULT', { reason: 'timeUp', atSec });
+    return true;
+  }
+
+  _allDotsDone() {
+    return this.dots.every((d) => d.state === 'stomped');
+  }
+
+  /* ---------------- K-11 寂静段光点 ---------------- */
+
+  _buildDots() {
+    if (!this.cfg) return [];
+    const from = silenceStartBeatOf(this.cfg);
+    const to = Number(this.cfg.lengthBeats) || 0;
+    const out = [];
+    for (let b = Math.ceil(from); b < to; b += 1) {
+      out.push({ beat: b, timeSec: this._clock.timeAtBeat(b), state: 'lit', relitUntil: null });
+    }
+    return out;
+  }
+
+  /** 寂静段的光点表（只读副本）。 */
+  silenceDots() {
+    return this.dots.map((d) => ({ ...d }));
+  }
+
+  /**
+   * 玩家在寂静段踩光点：**不产生 hp 变化、不进分母**（分母 = 可判定障碍总数）。
+   * @returns {object|null} 被踩灭的光点
+   */
+  stompDot(opt = {}) {
+    if (this._state !== 'SILENCE') return null;
+    const atSec = Number.isFinite(opt.atSec) ? opt.atSec : this._clock.now();
+    const win = this._goodSec();
+    let best = null;
+    let bestAbs = Infinity;
+    for (const d of this.dots) {
+      if (d.state !== 'lit') continue;
+      const abs = Math.abs(atSec - d.timeSec);
+      if (abs <= win && abs < bestAbs) {
+        best = d;
+        bestAbs = abs;
+      }
+    }
+    if (!best) return null;
+    best.state = 'stomped';
+    this._bumpCombo();
+    return { beat: best.beat, timeSec: best.timeSec, state: best.state };
+  }
+
+  /**
+   * DIS-07：段内光点 MISS = 清连击 + 无敌帧 + 该光点**只重亮一拍**；**不复活任何声部**。
+   * 复用 onMiss() 这条唯一 MISS 路径（SILENCE 内它的复活分支恒返回 null），不在这里再写一套「算不算 MISS」。
+   * @returns {object} 供 WORLD 演出的描述
+   */
+  dotMiss(beat, opt = {}) {
+    const atSec = Number.isFinite(opt.atSec) ? opt.atSec : this._clock.now();
+    const dot = this.dots.find((d) => d.beat === beat);
+    const before = this.hpByTrack();
+    this.onMiss({ atSec, source: 'silenceDot' });
+    const revived = DIS_TRACKS.filter((t) => this._hp[t] !== before[t]);
+    if (dot && dot.state === 'lit') {
+      dot.state = 'relit';
+      dot.relitUntil = this._clock.timeAtBeat(dot.beat + 1);
+      dot.missed = (dot.missed || 0) + 1;
+      // 重亮一拍后再到期 → 直接 expired（保证「只重亮一拍」，不会无限 MISS）
+      this._unsubs.push(this._clock.schedule(() => this._dotFinal(dot.beat), dot.relitUntil));
+    }
+    return { beat, combo: this.combo, invulnSec: FROZEN.invulnSec, revived, relitUntil: dot ? dot.relitUntil : null, state: dot ? dot.state : null };
+  }
+
+  _dotFinal(beat) {
+    const dot = this.dots.find((d) => d.beat === beat);
+    if (!dot || dot.state !== 'relit') return;
+    const nowSec = this._clock.now();
+    if (nowSec < dot.relitUntil - 0.002) {
+      this._unsubs.push(this._clock.schedule(() => this._dotFinal(beat), dot.relitUntil));
+      return;
+    }
+    dot.state = 'expired'; // 只重亮一拍；此后再不参与 MISS 判定
+  }
+
+  _dotDeadline(beat) {
+    if (this._state !== 'SILENCE') return;
+    const dot = this.dots.find((d) => d.beat === beat);
+    if (!dot || dot.state !== 'lit') return; // stomped / relit / expired 都不再触发 MISS
+    const nowSec = this._clock.now();
+    const due = dot.timeSec + this._goodSec();
+    if (nowSec < due - 0.002) {
+      this._unsubs.push(this._clock.schedule(() => this._dotDeadline(beat), due)); // CR-08 #4：提前派发要自检
+      return;
+    }
+    this.dotMiss(beat, { atSec: nowSec });
+  }
+
+  _scheduleDots() {
+    for (const d of this.dots) {
+      if (d.state !== 'lit') continue;
+      const due = d.timeSec + this._goodSec();
+      this._unsubs.push(this._clock.schedule(() => this._dotDeadline(d.beat), due));
+    }
+  }
+
+  _goodSec() {
+    const win = typeof this._judge?.windows === 'function' ? this._judge.windows() : null;
+    const ms = win && Number.isFinite(win.goodMs) ? win.goodMs : 110;
+    return ms / 1000;
+  }
+
+  /** 让本文件能问到当前 GOOD 窗口（寂静段光点的容差）；不是 C3 的一部分，仅注入用。 */
+  bindJudge(judge) {
+    this._judge = judge || null;
+    return this;
+  }
+
+  /* ---------------- 统计 / 结算 ---------------- */
+
+  _bumpCombo() {
+    this.combo += 1;
+    if (this.combo > this.maxCombo) this.maxCombo = this.combo;
+  }
+
+  invulnerable(atSec = this._clock.now()) {
+    return atSec < this._invulnUntil;
+  }
+
+  counts() {
+    return { ...this._n, combo: this.combo, maxCombo: this.maxCombo };
+  }
+
+  /** §7.3：Perfect 率 = PERFECT 数 / 固定分母（不含 bed、不随复活与重开变化）。 */
+  perfectRate() {
+    return this._denominator > 0 ? this._n.perfect / this._denominator : 0;
+  }
+
+  /** PRD §14 建议的第二项：核心命中率（不进 Perfect 率口径，仅结算展示）。 */
+  coreHitRate() {
+    return this._coreTotal > 0 ? this._n.corePerfect / this._coreTotal : 0;
+  }
+
+  rank() {
+    const th = (this.cfg && this.cfg.rankThresholds) || { S: 0.85, A: 0.7, B: 0.5 };
+    const r = this.perfectRate();
+    if (r >= th.S && this._n.miss === 0) return 'S';
+    if (r >= th.A) return 'A';
+    if (r >= th.B) return 'B';
+    return 'C';
+  }
+
+  stats() {
+    return {
+      state: this._state,
+      total: this._denominator,
+      coreTotal: this._coreTotal,
+      ...this.counts(),
+      perfect: this._n.perfect,
+      perfectRate: this.perfectRate(),
+      coreHitRate: this.coreHitRate(),
+      rank: this.rank(),
+      hp: this.hpByTrack(),
+      disassembled: this.disassembled(),
+      disassembledTracks: this.disassembledTracks(),
+      disassembleBeat: { ...this._disassembleBeat },
+      freeOrder: this._freeOrder,
+      dots: this.dots.map((d) => ({ beat: d.beat, state: d.state }))
+    };
+  }
+
+  /** 诊断用：最近一次写 hp 的入口名（只应是 'onJudgment' 或 'onMiss'）。 */
+  lastHpWriter() {
+    return this._hpWrittenBy;
+  }
+
+  /* ---------------- 障碍生成（DIS-04/05：停止生成 / 当前拍后恢复、不补发历史） ---------------- */
+
+  /** 当前应当「在场」的实例（WORLD 的 sync 与 JudgeSystem 的注册都用这一份）。 */
+  activeInstances() {
+    const base = this._pool.filter((o) => !this._retired.has(o.id));
+    return base.concat(this._extra);
+  }
+
+  _retireTrack(track) {
+    for (const o of this._pool) {
+      if (o.track === track && o.state === 'pending') this._retired.add(o.id);
+    }
+  }
+
+  _retiredIdsOf(track) {
+    return this._pool.filter((o) => o.track === track && this._retired.has(o.id)).map((o) => o.id);
+  }
+
+  /**
+   * 复活后重新下发该类障碍：只取 **当前拍之后** 且**因拆解被摘掉**的原始事件，复制成新 id 实例
+   * （state:'revived'），不补发历史（DIS-05）。新实例进 _extra，因此分母与 _pool 长度都不变。
+   * 只复制 `_retired` 里的项：hp>0 的声部从未被摘掉，它的未来障碍仍在原实例里，再复制一份就会
+   * 让同一拍出现两个可判定实例（JDG-08 的「同拍只消费 1 次」会吞掉第二个 → 玩家白丢一个障碍）。
+   */
+  _regenerate(track, atSec) {
+    const cur = this._clock.beatAt(atSec);
+    const ids = [];
+    for (const o of this._pool) {
+      if (o.track !== track) continue;
+      if (!this._retired.has(o.id)) continue;
+      if (!(o.beat > cur + 1e-9)) continue;
+      this._seq[track] += 1;
+      const copy = {
+        ...o,
+        id: `${o.id}-rv${this._seq[track]}`,
+        state: 'revived',
+        grade: null,
+        revived: true,
+        sourceId: o.id
+      };
+      this._extra.push(copy);
+      this._retired.delete(o.id);
+      ids.push(copy.id);
+    }
+    return ids;
+  }
+
+  /* ---------------- 事件广播（单向） ---------------- */
+
+  /** @returns {() => void} 退订（K-05 的 teardown 登记项） */
+  on(name, cb) {
+    if (!this._subs[name]) throw new RangeError(`[DisassembleSystem] 未知事件 ${name}，可用：${Object.keys(this._subs).join('|')}`);
+    if (typeof cb !== 'function') throw new TypeError('[DisassembleSystem] on(name, cb) 需要函数');
+    this._subs[name].push(cb);
+    return () => {
+      const i = this._subs[name].indexOf(cb);
+      if (i >= 0) this._subs[name].splice(i, 1);
+    };
+  }
+
+  listenerCount(name) {
+    return (this._subs[name] || []).length;
+  }
+
+  _emit(name, payload, atSec) {
+    const t = Number.isFinite(atSec) ? atSec : this._clock.now();
+    if (name === 'hp-change' && this.events) this.events.hp({ t, track: payload.track, hp: payload.hp });
+    if (name === 'state-change' && this.events) this.events.state({ t, from: payload.from, to: payload.to });
+    for (const cb of this._subs[name].slice()) {
+      try {
+        cb(payload, t);
+      } catch (err) {
+        console.error(`[DisassembleSystem] '${name}' 回调抛错（已隔离，不影响其余订阅方）：`, err);
+      }
+    }
+  }
+}
+
+export function createDisassembleSystem(deps) {
+  return new DisassembleSystemCore(deps);
+}
+
+/** C3 冻结的单例（LevelScene 默认用它）。 */
+export const DisassembleSystem = new DisassembleSystemCore({ clock: BeatClock });
+
+export default DisassembleSystem;
