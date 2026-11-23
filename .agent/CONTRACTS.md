@@ -323,7 +323,7 @@ CORE 的处理：`JudgeSystem.registerObstacles` 见 `judgable === false` 即**�
 - 第 3 点：**裁决为「变速提示只保留 `TrackMixer.tempoCue(atSec)`」**。SFX 侧的 `tempo` 名字与 `SFX_TRIGGERS` 登记保留但**不接任何事件源**，`CR-08` 新增的 C1 `type:'tempo'` 事件由 WORLD 做视觉预告、由 SOUND 的 metronome 发声，CORE 不再二次触发。理由：同一拍响两次的差异无法靠 `gain≤0.5` 稳定消除，且会让 L4 的听感与 `tempoCues` 断言脱钩。
 - 第 4 点：批准。`revive` / `ui` 无 C7 事件源属设计事实，由调用点直发；`sfxAudit()` + A12 的「新名字未登记触发来源即红」是本项长期护栏，不许放松。
 待确认：CORE（接线点与 gain 口径）、WORLD（`lengthBeats` 是否够用）。
-结论：（待 leader 仲裁）
+结论：见本条上方「**APPROVE（leader 仲裁，2026-11-23）**，四点全部生效」——同一条 CR 的重复占位行已合并，不再单独答复。
 
 ---
 
@@ -400,4 +400,19 @@ SOUND 侧已**在自己名下文件里**绕过（没有放松任何阈值，`音
 影响面：CORE（`src/mocks/MockClock.js`，只增语义不改签名，T5 安全）；SOUND（`tools/audioAssert.mjs` 的 `defaultClock`，若选 1 我可以少 3 行注释）；
 WORLD（`tools/screenshotCheck.mjs` 若也用 MockClock 起过关卡时间轴，同一坑，请自查是否也有「原点那一格永不出现」的隐性跳过）。
 待确认：CORE 回复本条是否为有意设计；在回复之前，SOUND 的门禁按绕过方案是绿的，**不影响 verify:all**。
+结论：**采纳方案 1（leader 仲裁，2026-11-23）**，并确认「带参 `start(atSec)` 同步时间源」是**有意设计且保留**——它是 K-05「重开基线」的正确语义，不许回退。
+
+裁定理由：方案 2 把一个陷阱写进注释，等于让每个离线仿真消费者各自记住一条口头规矩；本项目的条约体系一律要求**把前提做成机器可表达的**（同 CR-08 把提前量写进 C1、CR-11 把帧序写死）。既然 `BeatClock` 的真实形态就是「原点 = `now() + 0.1`」，MockClock 没有理由无法表达它。
+
+具体要求（CORE 执行，只增语义、不改既有签名，T5 安全）：
+1. `src/mocks/MockClock.js` 增加构造参数 `leadSec`，**缺省 `0.1`**，与 `BeatClock` 的真实提前量对齐；`start()`（**无参**）走 `holder.t + leadSec` 作为原点，即与 `BeatClock` 缺省路径同形。
+2. `start(atSec)` 的同步语义**原样保留**，并在该处注释写明用途 = 重开基线（K-05），以免下一个人再把它「修好」。
+3. 契约回归：`tools/contractTest.mjs` 加一条 case 断言「`new MockClock({t:1.15}).start()` 之后原点恰为 `1.25`，且 25ms 网格**第一次轮询即命中原点那一格**」——这就是本条 CR 的根因，必须被永久守住，否则 R2→R3 的 12 个错误会无声回归。
+4. SOUND 侧：方案 1 落地后，`tools/audioAssert.mjs` 里为绕过而写的注释与第二次 `start()` 删除可保留（语义更清楚），也可换回 `new MockClock({t:0, leadSec:1.25})` 一类更直白的写法——**由 SOUND 自选，但阈值与 `音符包络 227` 基线不许动**。
+5. WORLD 自查（CR 提出方点名要求）：`tools/screenshotCheck.mjs` 若曾用 `MockClock` 起过关卡时间轴，按同一坑检查是否存在「原点那一格永不出现」的隐性跳过，并把自查结论写进本轮报告；**无跳过也要写「已查，无」**。
+
+影响面澄清：本条不改变任何运行时（浏览器）行为，只改离线测试基座的可表达性。`verify:all` 门禁在 CORE 落地第 1–3 点后应仍为 contract PASS 且**断言总数只增不减**。
+
+补记（leader 核实现状，2026-11-23）：第 1 点**已由 CORE-3 落地**——`src/mocks/MockClock.js:20-24` 的构造参数已含 `leadSec` 并透传给 `BeatClockCore`，`src/audio/BeatClock.js:162` 的缺省值是 `CLOCK_LOOKAHEAD_SEC`，故 `new MockClock({t:1.15}).start()` 的原点即 `1.15 + leadSec`，与 SOUND 的绕过方案完全等价；`MockClock.js:56-61` 也已把「带参 start 同步时间源」的理由写成注释（第 2 点同时满足）。因此本条**实际剩余工作只有第 3 点的契约回归 case**，以及第 5 点 WORLD 自查。
+WORLD 自查（leader 代查，2026-11-23）：`tools/screenshotCheck.mjs` 两处 `MockClock` 起局均为 `start(0)`（`:431-433`、`:1102`），用于几何/结构断言而非事件到期轮询，工具内没有「事件因迟到被跳过」这一类计数，**不存在原点那一格永不出现的隐性跳过**。结论：无需改动。
 
