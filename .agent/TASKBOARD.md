@@ -156,3 +156,31 @@
 | 回放完整版 → 2× 分轨重组 | S-19（部分） | ~0.4 | 作品集叙事减弱，仍可展示拆解顺序 |
 | L5 假节拍 → 2 处演出型标记 | W-12 + S-14（部分） | ~0.5 | 少一条差异化卖点，六关数量不变 |
 | **不可砍** | K-02/07（判定与拆解）、W-07（拆解演出）、S-05/09/11/13/14/15（六关）、W-13（教学） | — | 支柱 1/3/4 与体量 |
+
+---
+
+## 实况状态 · R11（leader 更正，2026-11-23）
+
+> 上面 58 行的「状态」列是 **D0 计划快照**，此后一直没回写——这是编排失误（板是三个 agent 唯一的工作指令来源，状态失真会让人误派已完成的卡）。**以本节为准**，逐轮对账，证据列全部是实跑输出，不是「agent 说做完了」。
+
+| 轮 | 卡 | 实况 | 证据（可复跑） |
+|---|---|---|---|
+| D1 | K-01/02/03、W-01/02、S-01/02/03 | **done** | `contract:clock` `contract:judge` `render:zones` `render:selftest` `audio:envelope` `audio:voices` `level:draft-parse` 全绿 |
+| D2 | K-04/05/06、W-03/04/05/06、S-04/05/06 | **done** | `render:judgeX` `level:lv1` `level:breathe`；L1 浏览器全流程 `state=RESULT` |
+| D3 | K-07/08、W-07/08、S-07/09 | **done** | `contract:revive-tie` `contract:save` `render:disassemble` `render:revive` `audio:sections` `level:lv2`；DEF-04 把复活改为「取消退役」后 `restoredLive=3` |
+| D3 | S-08 | **rework（部分）** | 8 类音效里 `revive` 已接调用点，`ui` **未接线**（README 已知限制 10）→ 本轮派给 CORE/SOUND agent |
+| D4 | K-09/10、W-09/10/11、S-10/11/12 | **done** | `contract:actiontype` `contract:all` `render:tierReach` `render:gap` `render:coreMark` `level:--all` `level:lv3` `level:style` |
+| D5 | K-11/12、W-12、S-13/14/15/16 | **done** | `contract:silence` `contract:freeorder`（L6 `freeOrder:true`）`render:ghost` `level:lv4/5/6`；`tempoChanges` 120→140、`ghostBeats` 在 L5 非核心拍 |
+| D5 | **W-13** | **active（本轮派 WORLD）** | 我 R11 审计发现**一行都没实现**：无 `src/game/render/OverlayLayer.js`，全工程 `教学/Overlay/浮层` 只在 `LevelRuntime.js:284` 的注释里命中。D9「朋友无需指导即可玩」此前无支撑 |
+| D6 | K-13、W-14、S-17/18 | **done** | 五界面齐（`src/ui/screens/` 四屏 + 结算）；`QUALITY_PRESETS` 在 `theme.js:464`；`audio:loudness` 轨间差达标；`ReplayAssembler.scaleEvents(speed=2)` + `REPLAY_SPEEDS` 白名单 |
+| D6 | **K-14** | **active（本轮派 CORE/SOUND）** | 只有降级版活着（`[`/`]` + 暂停面板当前值）；`src/ui/Calibration.js` **不存在**，取中位数的小游戏没做。砍单建议属人类权限且**未批复**，故按完整版实现 |
+| D6 | K-15 | **review** | 跳转图与全流程已实跑（六关 title→关→RESULT 无断点，console 错误 0）；教学触发段待 W-13 落地 |
+| D7 | K-19、W-15、S-20 | **blocked** | 需 3 名真人试玩者的事件流与反馈表（`🚩审美门 2`）。需求方已明确「先出初版」，试玩不在本轮验收线 |
+| D8 | K-20 | **review** | 数值经 DEF-04/05 两轮回归（`contract:all` 802 断言）；`🚩逐秒看` 的 60s 录屏未做 |
+| D8 | W-16、S-19 | **blocked（半）** | 降级开关与配色终校已实现；bloom/粒子的**人眼**终校、60s 录屏粗剪、5 张截图属人类门禁 |
+| D9 | K-16 | **rework→部分替代** | 提交站 = 仓库本身：`main` 与 `v0.1.0` 已推达（`ssh://git@ssh.github.com:443`，HTTPS 走代理被 407）；**Vercel/itch 部署未做**。可见性：需求方批复「改成 public」，本机无 API 令牌，需浏览器会话执行 |
+| D9 | K-18 | **review** | README 已含玩法/双时钟与谱面同源/操作/本地运行/已知限制；tag 停在 `v0.1.0`（`v1.0.0` 留给上线轮） |
+| D9 | K-17、W-17、S-21 | **blocked** | Chrome/Edge/Firefox/Safari 兼容矩阵、Safari 音频自检、真机 iframe 画面——只有无头 Edge 跑过 |
+
+**🚩 人类门禁累计未过（agent 无权代判，T20）**：音色候选 3 套（S-02）、审美门 1 音色冻结（D3）、拆解演出 15s GIF（W-07）、能否指出核心节点（W-11）、D5 砍单决策、20 拍内首次 PERFECT（W-13）、审美门 2 试玩（D7）、审美门 3 录屏（D8）、线上无 404 与兼容矩阵（D9）。
+README「已知限制」1/2/3/4/5/10 条正是这些缺口的如实登记，不是待修的 bug 清单。
