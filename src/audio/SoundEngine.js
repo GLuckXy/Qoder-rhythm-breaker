@@ -13,7 +13,8 @@
 
 import { buildSchedule, silenceStartBeat, isoClock } from '../game/systems/PatternGenerator.js';
 import { TrackMixer, RAMP, MIXER_TRACKS, auditSchedule, db } from './TrackMixer.js';
-import { SFX_CANDIDATES, createVoiceEngine, resolveVoice, pitchToHz } from './SynthVoices.js';
+import { createVoiceEngine, resolveVoice, pitchToHz } from './SynthVoices.js';
+import { playSfxAt, sfxForEvent, clamp01 } from './Sfx.js'; // S-08：合成与 C7 路由都在 Sfx.js，这里只留委托
 import { createMetronome, clickPlan, tempoCuePlan, METRONOME_SHAPE } from './Metronome.js';
 
 const PRELOOK_SEC = 0.14; // 略大于 CLOCK_LOOKAHEAD_SEC(0.12)，保证每个事件都能在派发前进了队列
@@ -358,85 +359,26 @@ export class SoundEngine {
 
   getVolumes() { return Object.assign({}, this._volumes); }
 
-  /** SFX（S-08 的接口先冻结在这里：名字见 SFX_CANDIDATES）。 */
+  /**
+   * SFX（S-08）：委托给 src/audio/Sfx.js——名字与候选见 SFX_CANDIDATES，合成逐字沿用 R1。
+   * @param {string} name perfect|good|miss|crack|revive|ui|tempo|finish
+   * @param {{candidate?:string,atSec?:number,gain?:number}} [opts]
+   */
   playSfx(name, opts = {}) {
-    if (!this.ready) return false;
-    const def = SFX_CANDIDATES[name];
-    if (!def) return false;
-    const v = def.options[opts.candidate || def.default];
-    const at = Math.max(Number.isFinite(opts.atSec) ? opts.atSec : this.ctx.currentTime, this.ctx.currentTime + 0.0005);
-    const dest = this.sfx;
-    const g = this.ctx.createGain();
-    g.gain.setValueAtTime(0.0002, at);
-    g.gain.linearRampToValueAtTime(clamp01(v.level * (opts.gain ?? 1)), at + 0.008);
-    g.gain.setTargetAtTime(0.0002, at + 0.008, Math.max(0.02, v.durSec / 5));
-    g.gain.linearRampToValueAtTime(0, at + v.durSec);
-    g.connect(dest);
-    const osc = (type, hz) => {
-      const o = this.ctx.createOscillator();
-      o.type = type;
-      o.frequency.setValueAtTime(hz, at);
-      o.connect(g);
-      o.start(at);
-      o.stop(at + v.durSec + 0.02);
-      return o;
-    };
-    switch (v.kind) {
-      case 'sine': osc('sine', v.hz); break;
-      case 'saw': osc('sawtooth', v.hz); break;
-      case 'pluck': { const o = osc('triangle', v.hz); o.frequency.setTargetAtTime(v.hz * 0.6, at, v.durSec / 3); break; }
-      case 'twoTone': {
-        osc('sine', v.hzA);
-        const o2 = this.ctx.createOscillator();
-        o2.type = 'sine';
-        const g2 = this.ctx.createGain();
-        g2.gain.setValueAtTime(0.0002, at + v.durSec * 0.4);
-        g2.gain.linearRampToValueAtTime(clamp01(v.level * 0.8), at + v.durSec * 0.42);
-        g2.gain.linearRampToValueAtTime(0, at + v.durSec);
-        o2.frequency.setValueAtTime(v.hzB, at + v.durSec * 0.4);
-        o2.connect(g2).connect(dest);
-        o2.start(at + v.durSec * 0.4);
-        o2.stop(at + v.durSec + 0.02);
-        break;
-      }
-      case 'sineDrop': case 'sineRise': {
-        const o = osc('sine', v.startHz);
-        o.frequency[rampKind(v.kind)](Math.max(20, v.endHz), at + v.durSec * 0.9);
-        break;
-      }
-      case 'noiseRise': case 'noiseBurst': case 'noise': {
-        const len = Math.max(1, Math.floor(this.ctx.sampleRate * v.durSec));
-        const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
-        const d = buf.getChannelData(0);
-        for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
-        const s = this.ctx.createBufferSource();
-        s.buffer = buf;
-        const f = this.ctx.createBiquadFilter();
-        f.type = v.kind === 'noise' ? 'highpass' : 'bandpass';
-        f.frequency.setValueAtTime(v.hpHz, at);
-        if (v.kind === 'noiseRise') f.frequency.linearRampToValueAtTime(v.hpHz * 3, at + v.durSec);
-        s.connect(f).connect(g);
-        s.start(at);
-        s.stop(at + v.durSec + 0.02);
-        break;
-      }
-      case 'fm': {
-        const car = this.ctx.createOscillator();
-        car.frequency.setValueAtTime(v.carrierHz, at);
-        const mod = this.ctx.createOscillator();
-        mod.frequency.setValueAtTime(v.carrierHz * v.modRatio, at);
-        const mg = this.ctx.createGain();
-        mg.gain.setValueAtTime(v.modIndex, at);
-        mg.gain.setTargetAtTime(v.modIndex * 0.1, at, v.durSec / 2);
-        mod.connect(mg).connect(car.frequency);
-        car.connect(g);
-        car.start(at); mod.start(at);
-        car.stop(at + v.durSec + 0.02); mod.stop(at + v.durSec + 0.02);
-        break;
-      }
-      default: osc('sine', 440);
-    }
-    return true;
+    if (!this.ready || !this.ctx) return false;
+    return playSfxAt(this.ctx, this.sfx, name, opts);
+  }
+
+  /**
+   * C7/C1 事件 → 音效（**唯一**的事件消费入口：`penalizes === false` 的伪 MISS 在 Sfx.sfxForEvent 里就被拦掉，
+   * CORE/WORLD 不要再各自写一份「算不算响」的分支，CR-08 第 1 点同口径）。
+   * @param {object} ev 事件流条目（`kind` 或 C1 的 `type`）
+   * @param {object} [opts] 透传给 playSfx
+   * @returns {boolean} 是否真的响了
+   */
+  playForEvent(ev, opts = {}) {
+    const name = sfxForEvent(ev);
+    return name ? this.playSfx(name, opts) : false;
   }
 
   /** 结算/重开时清场：停掉未派发的排程（BeatClock.stop 会自己清队列，这里只归零指针）。 */
@@ -476,9 +418,7 @@ export class SoundEngine {
   }
 }
 
-/** sineRise 用线性上滑，sineDrop 用指数下滑（指数到 0 非法，故终点恒 >0）。 */
-function rampKind(kind) { return kind === 'sineRise' ? 'linearRampToValueAtTime' : 'exponentialRampToValueAtTime'; }
-function clamp01(x) { return Math.max(0, Math.min(1, Number(x) || 0)); }
+/** clamp01 与 rampKind 迁到 Sfx.js（S-08）；这里只留混音用的 ramp。 */
 function ramp(param, value, atSec, sec) {
   if (!param) return;
   param.cancelScheduledValues(atSec);

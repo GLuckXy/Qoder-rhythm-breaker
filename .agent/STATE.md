@@ -61,18 +61,25 @@ npx eslint <CORE 9 文件> 0 错 0 警；verify:all → contract OK / level OK /
 
 ## SOUND · 本轮变更
 ```
-交付 S-03/S-04/S-06/S-01/S-02（S-08 Sfx 按 leader 裁决推 R2）。新增 src/audio/{TrackMixer,SynthVoices,Metronome,SoundEngine}.js
-（SoundEngine 为 CR-02 批复后新增名下，需 CORE 补 C9 矩阵）；改 PatternGenerator.js（纯 build/buildAll/arrivalSpacing/
-analyzeRests/buildSchedule/selfTest(cfg,inst,clock)/silenceStartBeat）、level1/2.json（110/120BPM、128 拍、铺底写在
-noteEvents.bed 而非 JS、tracks[].voice 取代 preset，字段追加见 CR-10）、tools/{checkLevel,audioAssert}.mjs；删 .agent/run/genL12.mjs。
-按 CR-09 批复：build() 实例已删除 pxPerSec/beatWidthSec，改用 arrivalSpacing(instances,clock) 让 WORLD 自己乘 physics.pxPerSec，
-checkLevel 反向断言「实例再带这两个字段 = error」。按 CR-08 #3/#4：拍长一律 timeAtBeat 差分、engine 侧自检 leadSec<-0.002 不发声。
-验证：checkLevel --all → RESULT: PASS 2关 障碍111 核心30 喘息111处/228拍 空8拍窗0 同拍跨类0 错误0 警告0；audioAssert --all →
-RESULT: PASS 2关 事件198 轨间差max=1.36dB(≤3) 混音阶跃max=0.020(≤0.05) 音符包络162条 错误0 警告5（含整关仿真：响 198/198 次、
-迟到 0、长阻塞后队列项全跳过且补发 0；改坏参数反向跑均 FAIL，已还原）；npm run build ✓4.86s；npm run lint 0 错 0 警
-（CORE 记在我名下的 10 warning 已清零）；verifyAll 3/4 PASS 0 FAIL。风险：全程未做真实试听（结构断言 + 假 AudioContext），
-审美门 1 待人类实听定候选；§7.4 密度列与 physics 1.33 拍下限冲突，L1/L2 实测密度 1.90/2.00 已用 densityNote 记录偏离；L3–L6 未写。
-证据全文见 .agent/rounds/R1-SOUND.md。
+R2 交付：新增 src/data/levels/level{3,4,5,6}.json（谱面内容，§7.4 六关齐）+ src/audio/Sfx.js（S-08，合成逐字从
+SoundEngine.playSfx 迁出，无新机制）；改 SoundEngine.js（playSfx 变委托 + 新增 playForEvent 作 C7 消费唯一入口）、
+SynthVoices.js（createVoiceEngine 起音 0.0008→0.006，与 buildSchedule 的 RAMP.minAttackSec 对齐，A2 抓出的真爆音）、
+tools/checkLevel.mjs（§11 关卡级 gate：L3 弹幕必须落整数冲刺拍且前后满足 actionRecoveryBeats、L4 变速配置锁死
+「64 拍 120→140 过渡 2 拍」+过渡区间留白、L5 ghostBeats 不落核心拍、L6 freeOrder+windowScale 0.95+三声部核心 ≥6+同窗峰值）、
+tools/audioAssert.mjs（三处口径修正：FM 调制深度节点不再当幅度包络、长阻塞仿真改用带 tempoChanges 的 defaultClock、
+「补发」= 早于跳点的发声；新增 A12 SFX 断言）；删 .agent/run/genL3456.mjs（一次性吐 JSON，src/ 内零 pattern 数组）。
+未动 R1 已验收机制与 CORE-2/WORLD-2 名下文件，未跑 git/npm install。
+数据：L3 chiptune 126/128 61.0s 到达52 密度1.86(声明2.0) 床56 核心15(7/4/4)；L4 dnb 120→140@64 160拍 73.1s 到达83
+2.31(2.5) 床69 核心22(9/7/6) 发声152/仿真152 cues1 变速提示1；L5 glitch 128/144 67.5s 到达64 2.00(2.0) 床64 核心20(8/6/6)
+ghostBeats 8 条(4 压非核心到达拍+4 落空拍，validateGhosts 真触发)；L6 full-arr 132/160 72.7s 到达99 2.75(3.0) 床72 核心27(9/9/9) freeOrder。
+验证：checkLevel --all → PASS 6关 障碍409 核心114 空8拍窗0 同拍跨类0 错误0 警告0；audioAssert --all → PASS 6关 事件757
+轨间差max=2.03dB 混音阶跃max=0.020 音符包络227条 错误0 警告13（全是 R1 既有口径提示）；npm run lint 0/0；npm run build ✓8.84s。
+反向验证全部 FAIL 过并已还原：L3 弹幕 @24.5、L4 transitionBeats=1、L5 ghost@核心拍4、L6 freeOrder=false+windowScale=0.9、
+Sfx 去掉 penalizes 守卫（→ 错误4）。
+偏离与风险：① 实测密度低于 §7.4 声明值（根因仍是 physics 的 1.33 拍下限），已逐关写进 densityNote；② 仍未真实试听，
+音色候选按 T16 全取最保守默认（L3 punch/round/square/bit、L4 metal/reese/fm/ride、L5 metal/reese/fm/bit、
+L6 punch/saw/supo/ride），待人类审美门 1 点名；③ S-18 ReplayAssembler **未做**（CORE-2 正在写 hp/state 的生产者与场景，
+本轮没有消费者，不做无证据交付）；④ Sfx.playForEvent 尚无调用点，请 CORE 接线（口径见 CR-12）。全文见 .agent/rounds/R2-SOUND.md。
 ```
 
 ## 当前可运行状态

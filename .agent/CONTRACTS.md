@@ -290,3 +290,33 @@ CORE 的处理：`JudgeSystem.registerObstacles` 见 `judgable === false` 即**�
 - 第 3 点：批准，并**追加一条硬约束**：`leadSec < -0.002` 跳过不补发的规则同样适用于超时 MISS 与段落事件；仓库内禁止出现任何 `setTimeout` 型音频/判决定时（CORE 的 `forbid-clock` case 请顺手把 `setTimeout(` 在 `src/audio/**` 与 `src/game/systems/**` 的出现纳入扫描）。
 - SOUND 提出的「一次都没听过」是本项目的 P0 残留风险，已记入 STATE 的 `human-actions`；leader 会在集成轮用真实浏览器跑通发声链路并把 `?selftest=audio` 的 JSON 作为证据，听感门仍留给人类。
 
+---
+
+### CR-12 | 提出：SOUND | 轮次：R2 | 涉及契约：C5 level JSON（ghostBeats）、C7 事件流（消费侧）、C9 所有权矩阵（Sfx.js 落地）
+
+需求（四点，全部是**已在代码里实现的事实登记**，不改任何既有签名）：
+
+1. **C5 补一个字段口径**：`ghostBeats[]` 的元素除 `beat` 外可带 `offsetBeats:number` 与 `lengthBeats:number`（1–2 拍）。
+   现状：`PatternGenerator.validateGhosts()`（R1 已批的 C 类纯函数）已在读这两个字段并硬拦「ghost 落在核心节点拍」，
+   L5 用 8 条（4 条压在非核心的真实到达拍上做「说谎」、4 条落空拍）把它真正触发；C5 文档里此前只写了 `ghostBeats` 一句。
+   请把它升格为正式字段：`{beat, offsetBeats?, lengthBeats?}`，**只增不改**，且 `lengthBeats` 的取值范围由 SOUND 的 gate 保持 1–2。
+2. **C7 的声音消费入口收敛到 `src/audio/Sfx.js`**（S-08 本轮落地，C9 矩阵里这一行早就挂 SOUND 名下）：
+   - `Sfx.sfxForJudgment(j)`：**先判 `penalizes === false` 再落 `grade`**（CR-08 第 1 点同口径），空拍伪 MISS 返回 `null` = 不出声；
+   - `Sfx.sfxForEvent(ev)`：`judge`→perfect/good/miss；`hp` 且 `hp===0`→`crack`（声部彻底碎裂；途中每点掉血都响会与判定声叠加成糊）；
+     `input`→`null`（按键不配音）；`state.to==='RESULT'`→`finish`；C1 的 `type:'tempo'`→`tempo`；
+   - `SoundEngine.playForEvent(ev, opts)` 是上述路由的引擎侧包装（返回「是否真响了」），`SoundEngine.playSfx(name, opts)` 语义不变、
+     只是改为委托 `Sfx.playSfxAt(ctx, sfxBus, name, opts)`，合成包络与 R1 逐字一致。
+   请 CORE 在判定/事件出口调 `engine.playForEvent(ev)`，**不要**在场景里再写一份 `grade → 音效名` 的映射（防 RA1 契约漂移，与 CR-08 批复一致）。
+3. **`tempo` 音效与 `tempoCue` 的分工**（避免变速关响两次）：C6 的 `TrackMixer.tempoCue(atSec)` 仍是节拍器侧的双音点击（CR-11 第 1 点），
+   SFX 的 `tempo` 是可选项；L4 的实测口径是「cues 1 条 + 谱面 gate 要求过渡区间 (58,64) 内不铺任何发声事件」。
+   若 CORE 决定两处都发，请把 `opts.gain` 降到 0.5 以下，或只保留 `tempoCue`。
+4. **`revive` / `ui` 两个名字无事件源**：C7 没有「复活」与「菜单点击」事件（`hp` 单调不增，`input` 不配音），
+   它们只能由调用点直发 `engine.playSfx('revive'|'ui')`。`Sfx.SFX_TRIGGERS` 把 8 个名字的触发来源写死并有 `sfxAudit()` 检查，
+   新增名字若忘了登记触发来源，`tools/audioAssert.mjs` 的 A12 会直接红。
+
+理由：R2 把 L3–L6 与 S-08 落在同一套机制上，上述四处都是「代码已如此、文档未如此」的落差；不登记就会在 R3 被别人按旧文档改写。
+影响面：CORE（`playForEvent` 一处接线，可选；C5 字段仅供 SOUND/WORLD 读）；WORLD（`ghostBeats[].lengthBeats` 是渲染时长来源，若 want 别的单位请在本条批复前说）。
+兼容性：`playSfx(name, opts)` 签名与返回布尔不变；`SFX_CANDIDATES` 8 个名字与候选参数一字未动；无新增依赖、无素材文件。
+待确认：CORE（接线点与 gain 口径）、WORLD（`lengthBeats` 是否够用）。
+结论：（待 leader 仲裁）
+

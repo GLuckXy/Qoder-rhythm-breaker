@@ -210,7 +210,9 @@ export function createVoiceEngine(ctx, dest) {
   const env = (v, atSec, durSec, level) => {
     const g = ctx.createGain();
     const peak = Math.max(0.0002, level);
-    const a = Math.max(0.0008, v.attack * durSec);
+    // 起音下限与 PatternGenerator.buildSchedule 的 attackSec 同口径（TrackMixer.RAMP.minAttackSec = 6ms）：
+    // 短时值音符（如 L3/L6 的 1/16 琶音、铺底）按 attack×durSec 会算出 1–3ms → 可闻爆音，且与 Node 侧断言不一致。
+    const a = Math.max(0.006, Math.min(v.attack * durSec, durSec * 0.6));
     g.gain.setValueAtTime(0.0002, atSec);
     g.gain.linearRampToValueAtTime(peak, atSec + a);
     g.gain.setTargetAtTime(0.0002, atSec + a, Math.max(0.008, durSec / Math.max(0.5, v.decay)));

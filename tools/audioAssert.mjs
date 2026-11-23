@@ -190,8 +190,12 @@ export function auditNoteEnvelopes(fakeCtx) {
   const errors = [];
   const notes = fakeCtx.nodes.filter((n) => n.kind === 'gain' && n.gain && n.gain.events.length > 2 && n.__tag !== 'mix');
   let attacks = [];
+  let modNodes = 0;
   for (const n of notes) {
     const evs = n.gain.events.filter((e) => e.kind !== 'initial');
+    // 调制深度节点不是幅度包络（FM 载波的 modGain 值域是 Hz，几十到几百）；幅度包络由 peak 归一保证 ≤1，
+    // 因此「最大值 >1.5」是唯一的区分依据 —— 真音符增益永远进不来这一支。
+    if (Math.max(...evs.map((e) => e.v || 0)) > 1.5) { modNodes += 1; continue; }
     if (evs[0].kind !== 'set' || evs[0].v > 0.001) { errors.push(`音符包络没有从静音起（首事件 ${evs[0].kind}=${evs[0].v}，序列 ${evs.map((x) => x.kind).join('>')}）`); continue; }
     if (evs[evs.length - 1].kind !== 'lin' || evs[evs.length - 1].v > 0.0005) errors.push('音符包络末尾没有线性归零');
     const peak = Math.max(...evs.map((e) => e.v || 0));
@@ -203,7 +207,7 @@ export function auditNoteEnvelopes(fakeCtx) {
   }
   const minAttack = attacks.length ? Math.min(...attacks) : null;
   if (minAttack !== null && minAttack < 0.006 - 1e-9) errors.push(`最短起音 ${minAttack.toFixed(4)}s < 6ms（可闻爆音下限）`);
-  return { errors, notes: notes.length, minAttackSec: minAttack === null ? null : Number(minAttack.toFixed(4)), maxAttackSec: attacks.length ? Number(Math.max(...attacks).toFixed(4)) : null };
+  return { errors, notes: notes.length, modNodes, minAttackSec: minAttack === null ? null : Number(minAttack.toFixed(4)), maxAttackSec: attacks.length ? Number(Math.max(...attacks).toFixed(4)) : null };
 }
 
 /** A9：silence 必须 0.1s 线性到 min，revive 必须 0.15s 线性回升；任何 <4ms 的斜坡视为瞬断。 */
@@ -322,7 +326,6 @@ async function defaultClock(cfg) {
 async function simulateLevel(cfg, schedule, met) {
   const errors = [];
   const warnings = [];
-  const { isoClock } = await import('../src/game/systems/PatternGenerator.js');
   const mod = await import('../src/audio/SoundEngine.js');
   const ref = { t: 0 };
   const fake = makeFakeContext({ currentTimeRef: ref });
@@ -374,7 +377,8 @@ async function simulateLevel(cfg, schedule, met) {
     const engine2 = mod.createSoundEngine();
     engine2.init(fake2);
     if (!engine2.ready) errors.push(`仿真2：注入假上下文后 init 失败（${engine2.lastError}）`);
-    const clock2 = isoClock(cfg);
+    const clock2 = await defaultClock(cfg); // 必须与外层同一口径：isoClock 桩不认 tempoChanges，
+    // L4（120→140）的节拍器/事件时刻会被排成等速，与真时钟算出的 schedule 错位，长阻塞仿真末尾的光点永远排不到。
     clock2.now = () => ref2.t;
     const queue2 = [];
     clock2.schedule = (fn, at) => { queue2.push({ fn, at }); return () => {}; };
@@ -432,7 +436,9 @@ async function simulateLevel(cfg, schedule, met) {
     if (played3 + clicked3 < afterJump - late2 - 8) {
       warnings.push(`仿真（长阻塞后恢复）：跳点吞掉了 ${afterJump - played3 - clicked3} 条（含 ${late3} 条迟到），属预期内的「宁缺不糊」`);
     }
-    const replayed = heard.filter((h) => h[2] <= jumpSec + 0.14 - 1e-6);
+    // 「补发」的定义：跳点（=恢复瞬间的墙上时刻）已经过去的时刻还被发声。
+    // 旧口径把 jumpSec 之后 0.14s 内的事件也算补发，那是预调度视域内的**未来**事件，本来就该响（L4 变速关必现误报）。
+    const replayed = heard.filter((h) => h[2] < jumpSec - 0.002);
     if (replayed.length) errors.push(`仿真（长阻塞后恢复）：将跳点之前的 ${replayed.length} 个事件补发了（例 ${replayed[0].join('@')}）`);
     const dup = heard.filter((h, i) => heard.findIndex((x) => x[0] === h[0] && x[1] === h[1]) !== i);
     if (dup.length) errors.push(`仿真（长阻塞后恢复）：${dup[0][0]}@${dup[0][1]} 重复发声`);
@@ -464,6 +470,37 @@ async function simulateLevel(cfg, schedule, met) {
     engine.setDuck(true);
     engine.playSfx('perfect');
     engine.playSfx('ui');
+    // A12（S-08）：音效合成已拆到 src/audio/Sfx.js —— 8 个名字逐个要在假 ctx 上真长出节点，
+    // 且 C7 路由必须「先判 penalizes === false 再落 grade」（CR-08 第 1 点），空拍伪 MISS 不许出声。
+    const sfxMod = await import('../src/audio/Sfx.js');
+    const sfxAuditRes = sfxMod.sfxAudit();
+    if (sfxAuditRes.errors.length) errors.push(...sfxAuditRes.errors.map((e) => `Sfx 审计：${e}`));
+    const sfxBefore = fake.nodes.length;
+    const sfxSilent = sfxMod.SFX_NAMES.filter((n) => engine.playSfx(n) !== true);
+    if (sfxSilent.length) errors.push(`Sfx：${sfxSilent.join(',')} 发不出声（名字表与合成器对不上？）`);
+    if (fake.nodes.length <= sfxBefore) errors.push('Sfx：调用后节点图没有增长（playSfx 退化成空操作？）');
+    if (engine.playSfx('nope') !== false) errors.push('Sfx：未知名字应返回 false');
+    const sfxRoute = [
+      [{ kind: 'judge', grade: 'PERFECT', id: 'x' }, true],
+      [{ kind: 'judge', grade: 'GOOD', id: 'x' }, true],
+      [{ kind: 'judge', grade: 'MISS', rule: 'timeout', id: null }, true],
+      [{ kind: 'judge', grade: 'MISS', rule: 'emptyBeat', obstacleId: null, penalizes: false }, false],
+      [{ kind: 'hp', track: 'bass', hp: 0 }, true],
+      [{ kind: 'hp', track: 'bass', hp: 60 }, false],
+      [{ kind: 'input', key: 'jump', hasTarget: false }, false],
+      [{ kind: 'state', from: 'PEAK', to: 'RESULT' }, true],
+      [{ type: 'tempo', beat: 62, fromBpm: 120, toBpm: 140 }, true]
+    ];
+    const sfxRouted = [];
+    for (const [ev, want] of sfxRoute) {
+      const got = engine.playForEvent(ev);
+      if (got !== want) errors.push(`Sfx 路由 ${JSON.stringify(ev)}：应 ${want ? '响' : '不响'}，实得 ${got}`);
+      const name = sfxMod.sfxForEvent(ev);
+      if (name) sfxRouted.push(name);
+    }
+    if (sfxMod.sfxForJudgment({ grade: 'MISS', rule: 'emptyBeat', penalizes: false }) !== null) {
+      errors.push('Sfx 路由：emptyBeat 伪 MISS 被路由成音效（违反 CR-08 第 1 点）');
+    }
     const cueNoArg = engine.tempoCue();
     if (cueNoArg !== false) volErr.push('tempoCue() 无参调用应返回 false（签名 = tempoCue(atSec)）');
     const cueSec = engine.cues[0] ? engine.cues[0].timeSec : clock.timeAtBeat(8);
@@ -473,7 +510,7 @@ async function simulateLevel(cfg, schedule, met) {
     if (engine.ensureRunning() === undefined) volErr.push('ensureRunning() 应返回布尔（CORE 每帧调用）');
     errors.push(...auto.errors, ...notes.errors, ...ramps.errors, ...volErr);
     if (fake.nodes.length <= before) warnings.push('仿真：节点图没有增长（发声体可能没被调用）');
-    const simExtra = { mixMaxStep: auto.maxStep, mixNodes: auto.nodes, noteNodes: notes.notes, noteMinAttackSec: notes.minAttackSec, noteMaxAttackSec: notes.maxAttackSec };
+    const simExtra = { mixMaxStep: auto.maxStep, mixNodes: auto.nodes, noteNodes: notes.notes, noteModNodes: notes.modNodes, noteMinAttackSec: notes.minAttackSec, noteMaxAttackSec: notes.maxAttackSec, sfxNames: sfxMod.SFX_NAMES.length, sfxRouted: [...new Set(sfxRouted)].sort() };
     const status = engine.getStatus();
     return {
       errors,

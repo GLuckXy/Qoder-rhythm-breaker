@@ -18,6 +18,7 @@ import {
   analyzeRests,
   arrivalSpacing,
   silenceStartBeat,
+  actionRecoveryBeats,
   validateGhosts,
   validateTempoChanges,
   validateFreeOrder,
@@ -228,10 +229,111 @@ function checkLevel(cfg, clock) {
     if (tiers.size < 2) warnings.push(`L2 平台只用到 ${tiers.size} 档 pitchTier（§11 要求音高→三档）`);
   }
 
-  if (stats.seconds < SECONDS_RANGE[0] || stats.seconds > SECONDS_RANGE[1]) errors.push(`总时长 ${stats.seconds}s 不在 ${SECONDS_RANGE.join('–')}s`);
+  // ---- §11 L3–L6 逐关门禁（R2 追加：新关卡的机制必须被断言触发，不许只有函数没有关卡）----
+  const beatSecAt = (b) => (typeof clock.beatLengthSec === 'function' ? clock.beatLengthSec(b) : 60 / (Number(cfg.bpm) || 120));
+  const threeTracks = (label) => {
+    for (const t of ['kick', 'bass', 'synth']) if (Number(cfg.tracks?.[t]?.hp) !== 4) errors.push(`${label} 应三声部：${t}.hp 必须为 4`);
+  };
+  if (cfg.id === 3) {
+    if (cfg.bpm !== 126 || cfg.lengthBeats !== 128 || cfg.silenceBeats !== 12 || cfg.windowScale !== 1.0) {
+      errors.push('L3 参数偏离 §11（应 126BPM / 128 拍 / silenceBeats 12 / ×1.0）');
+    }
+    threeTracks('L3');
+    // 弹幕只出现在冲刺拍（§11 L3 / R3 认知过载缓解）：落整数拍 + 上一到达已「落地+缓冲」完毕（玩家必定在地面上才谈得上冲刺），
+    // 且冲刺本身（dashDurBeats + 缓冲）能在下一个到达之前走完。
+    const sorted = [...instances].filter((i) => i.judgable !== false).sort((a, b) => a.beat - b.beat);
+    for (let i = 0; i < sorted.length; i++) {
+      const it = sorted[i];
+      if (it.track !== 'synth') continue;
+      if (Math.abs(it.beat % 1) > 1e-9) errors.push(`L3 弹幕 @${it.beat} 不在整数拍 → 不是可数的冲刺拍`);
+      const prev = sorted[i - 1];
+      const next = sorted[i + 1];
+      if (prev) {
+        const need = actionRecoveryBeats(beatSecAt(prev.beat)).jump;
+        const gap = it.beat - prev.beat;
+        if (gap < need - 1e-9) errors.push(`L3 弹幕 @${it.beat} 距上一到达 ${gap.toFixed(3)} 拍 < 跳跃恢复 ${need.toFixed(3)} 拍（玩家还在滞空，无法冲刺）`);
+      }
+      if (next) {
+        const need = actionRecoveryBeats(beatSecAt(it.beat)).dash;
+        const gap = next.beat - it.beat;
+        if (gap < need - 1e-9) errors.push(`L3 弹幕 @${it.beat} 之后 ${gap.toFixed(3)} 拍就来下一到达 < 冲刺持续 ${need.toFixed(3)} 拍`);
+      }
+    }
+    // 琶音时值 → 弹幕速度（OBS-04）：映射表必须真的把三档都跑出来，否则「看速度预判密度」落空
+    const speeds = new Set(instances.filter((i) => i.track === 'synth').map((i) => i.speed));
+    if (speeds.size < 3) errors.push(`L3 弹幕 speed 只映射出 ${speeds.size} 档（§11 要求 d→速度三档可辨）`);
+    const durs = new Set(instances.filter((i) => i.track === 'synth').map((i) => i.durBeats));
+    if (durs.size < 3) errors.push(`L3 琶音时值只有 ${durs.size} 种，映射不到三档速度`);
+  }
+  if (cfg.id === 4) {
+    if (cfg.bpm !== 120 || cfg.lengthBeats !== 160 || cfg.silenceBeats !== 12 || cfg.windowScale !== 1.0) {
+      errors.push('L4 参数偏离 §11（应 120→140 / 160 拍 / silenceBeats 12 / ×1.0）');
+    }
+    threeTracks('L4');
+    const tc = Array.isArray(cfg.tempoChanges) ? cfg.tempoChanges : [];
+    if (tc.length !== 1 || Number(tc[0].beat) !== 64 || Number(tc[0].bpm) !== 140 || Number(tc[0].transitionBeats) !== 2) {
+      errors.push('L4 变速配置偏离 §11（应恰好一项：第 64 拍 120→140、过渡 2 拍）');
+    } else {
+      // CR-08 第 3 点 leader 批复口径 = 过渡区间对「拍长（周期）」线性插值（不是对 BPM 插值）→ 区间积分是梯形
+      const pFrom = beatSecAt(62);
+      const pTo = beatSecAt(64);
+      const t62 = clock.timeAtBeat(62);
+      const t64 = clock.timeAtBeat(64);
+      const t66 = clock.timeAtBeat(66);
+      if (Math.abs(pTo - 60 / 140) > 1e-6) errors.push(`L4 变速后拍长 ${pTo.toFixed(6)} ≠ 60/140=${(60 / 140).toFixed(6)}`);
+      const trap = (pFrom + pTo) / 2 * 2;
+      if (Math.abs((t64 - t62) - trap) > 2e-3) errors.push(`L4 过渡 2 拍实得 ${(t64 - t62).toFixed(5)}s ≠ 拍长线性梯形 ${trap.toFixed(5)}s（口径被改）`);
+      if (Math.abs((t66 - t64) - 2 * pTo) > 2e-3) errors.push(`L4 变速后两拍 ${(t66 - t64).toFixed(5)}s ≠ 2×新拍长 ${(2 * pTo).toFixed(5)}s`);
+      const inTransit = all.filter((i) => i.beat >= 62 - 1e-9 && i.beat < 64 - 1e-9);
+      if (inTransit.length) errors.push(`L4 过渡区间 [62,64) 有 ${inTransit.length} 条谱面事件（含 bed）——这 2 拍必须留给变速提示音`);
+      const post = instances.filter((i) => i.beat >= 64 - 1e-9);
+      const bad = post.filter((i) => Math.abs(i.timeSec - clock.timeAtBeat(i.beat)) > 1e-4);
+      if (bad.length) errors.push(`L4 变速后 ${bad.length} 个障碍的 timeSec ≠ timeAtBeat(beat)（例 ${bad[0].id}）`);
+      stats.tempoPostEvents = post.length;
+      stats.tempoTrapezoidSec = Number((t64 - t62).toFixed(4));
+    }
+  }
+  if (cfg.id === 5) {
+    if (cfg.bpm !== 128 || cfg.lengthBeats !== 144 || cfg.silenceBeats !== 12 || cfg.windowScale !== 0.95) {
+      errors.push('L5 参数偏离 §11（应 128BPM / 144 拍 / silenceBeats 12 / ×0.95）');
+    }
+    threeTracks('L5');
+    const gb = Array.isArray(cfg.ghostBeats) ? cfg.ghostBeats : [];
+    if (!gb.length) errors.push('L5 ghostBeats 为空：§11 的假节拍机制没有落地（validateGhosts 就成了死代码）');
+    if (ghosts.count !== gb.length) errors.push(`L5 validateGhosts 未被触发：count ${ghosts.count} ≠ 配置 ${gb.length}`);
+    for (const g of gb) {
+      const b = Number(g.beat);
+      if (!(b >= lo - 1e-9 && b <= hi + 1e-9)) errors.push(`L5 ghost @${b} 落在可玩区 [${lo},${hi}] 外`);
+      const len = Number(g.lengthBeats);
+      if (!(len >= 1 && len <= 2)) errors.push(`L5 ghost @${b} 持续 ${len} 拍，§11 要求 1–2 拍`);
+      if (!Number.isFinite(Number(g.offsetBeats))) errors.push(`L5 ghost @${b} 缺 offsetBeats（WORLD 的说谎位移量）`);
+    }
+    // 说谎的对象：核心拍已由 validateGhosts 硬拦；这里再量化「假标记里有多少压在真实到达拍上」
+    const arrivals = new Set(instances.filter((i) => i.judgable !== false).map((i) => i.beat));
+    const onReal = gb.filter((g) => arrivals.has(Number(g.beat))).length;
+    stats.ghostsOnRealArrival = onReal;
+    if (onReal < 2) warnings.push(`L5 假标记只有 ${onReal} 处压在真实到达拍上，「视觉说谎」偏弱`);
+    // 压在真实到达拍上 = 设计意图（对非核心障碍拍说谎），核心拍已被 validateGhosts 硬拦，故这里不再报警。
+    stats.ghostsOnEmptyBeats = gb.length - onReal;
+  }
+  if (cfg.id === 6) {
+    if (cfg.bpm !== 132 || cfg.lengthBeats !== 160 || cfg.silenceBeats !== 12) {
+      errors.push('L6 参数偏离 §11（应 132BPM / 160 拍 / silenceBeats 12）');
+    }
+    if (cfg.windowScale !== 0.95) errors.push(`L6 windowScale ${cfg.windowScale} ≠ 0.95（leader 决策 L-07：难度由密度表达，不用 §7.4 表的 0.9）`);
+    if (cfg.freeOrder !== true) errors.push('L6 必须 freeOrder:true（§11 拆解顺序自选）');
+    threeTracks('L6');
+    if (free.errors.length === 0 && free.peakConcurrency < 3) errors.push(`L6 三声部核心同窗峰值 ${free.peakConcurrency} < 3`);
+    let tri = 0;
+    for (let b = lo; b + 4 <= hi; b++) {
+      const s = new Set(instances.filter((i) => i.core && i.beat >= b && i.beat < b + 4).map((i) => i.track));
+      if (s.size === 3) tri++;
+    }
+    stats.coreTriWindows = tri;
+    if (tri < 4) errors.push(`L6 三声部核心同时在场的 4 拍窗只有 ${tri} 个（§11：三声部常驻可交互、任意顺序通关）`);
+  }
 
-
-  return {
+  if (stats.seconds < SECONDS_RANGE[0] || stats.seconds > SECONDS_RANGE[1]) errors.push(`总时长 ${stats.seconds}s 不在 ${SECONDS_RANGE.join('–')}s`);  return {
     cfg,
     instances,
     schedule: sched,
