@@ -45,6 +45,8 @@ export class LevelRuntime {
     this.onEnd = typeof deps.onEnd === 'function' ? deps.onEnd : null;
     this.onQuit = typeof deps.onQuit === 'function' ? deps.onQuit : null;
     this.onLog = typeof deps.onLog === 'function' ? deps.onLog : null;
+    /** K-13：暂停面板的开/关通知（paused: boolean）。暂停权威仍在 BeatClock，这里只报状态变化。 */
+    this.onPauseChange = typeof deps.onPauseChange === 'function' ? deps.onPauseChange : null;
     this._offs = []; // ★ 唯一的释放登记表：每一项都必须是 0 参函数
     this._keys = [];
     this._extra = {};
@@ -265,6 +267,7 @@ export class LevelRuntime {
     else this.clock.resume();
     if (this.engine) this.engine.setPaused(this.paused);
     this._log(this.paused ? '暂停（clock.pause 是唯一权威）' : '恢复（拍序不重置，R11）');
+    if (this.onPauseChange) this.onPauseChange(this.paused);
     return this.paused;
   }
 

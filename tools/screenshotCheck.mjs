@@ -43,14 +43,17 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  ALPHA,
   BACKGROUND_CFG,
   COLOR_HEX_WHITELIST,
   COLORS,
+  CORE_MARK,
   DEFAULT_QUALITY,
   DEGRADE_ORDER,
   DERIVED,
   FONT_MIN_PX,
   FONT_TIERS,
+  FX_TIMING,
   GRAY_CONTRAST_MIN,
   LEAD_BEATS,
   LUMA_BY_TRACK,
@@ -68,6 +71,7 @@ import {
   ZONE_RATIOS,
   THEME_VERSION,
   beatOffsetX,
+  beatToTimeOf,
   buildView,
   clampQuality,
   cssTokens,
@@ -82,6 +86,7 @@ import {
   Obstacle,
   assertUniqueInstanceIds,
   beatsToJudge,
+  coreBracketLines,
   isOnScreen,
   isRenderableInstance,
   judgeLineX,
@@ -105,8 +110,12 @@ import {
   Timeline,
   alignDashAlpha,
   beatX,
+  ghostGeometry,
   isBeatsVisible,
   laneY,
+  normalizeGhosts,
+  normalizeTempoCues,
+  tempoCueGeometry,
   timelineJudgeX,
   timelineMarkerSize,
   timelinePxPerBeat,
@@ -315,15 +324,100 @@ export class RecordingGraphics {
   }
 }
 
+/**
+ * 假 Phaser Text（W-07 大字标题的录制容器）：WorldLayer 只调 setText/setVisible/setAlpha/
+ * setScale/setPosition/setFontSize，本类记录**每次调用的值**，于是「三要素是否同一帧落地」
+ * 可以从操作序列里证明，而不是靠人眼看截图。
+ */
+export class RecordingText {
+  constructor(tag = 't', style = {}) {
+    this.tag = tag;
+    this.style = style;
+    this.text = '';
+    this.visible = true;
+    this.alpha = 1;
+    this.scaleX = 1;
+    this.scaleY = 1;
+    this.x = 0;
+    this.y = 0;
+    this.fontSize = style.fontSize || null;
+    this.depth = 0;
+    this.destroyed = false;
+    this.calls = [];
+  }
+
+  setText(v) {
+    this.text = String(v);
+    this.calls.push(['setText', this.text]);
+    return this;
+  }
+
+  setVisible(v) {
+    this.visible = !!v;
+    this.calls.push(['setVisible', this.visible]);
+    return this;
+  }
+
+  setAlpha(v) {
+    this.alpha = v;
+    this.calls.push(['setAlpha', v]);
+    return this;
+  }
+
+  setScale(sx, sy) {
+    this.scaleX = sx;
+    this.scaleY = sy == null ? sx : sy;
+    this.calls.push(['setScale', sx]);
+    return this;
+  }
+
+  setPosition(x, y) {
+    this.x = x;
+    this.y = y;
+    this.calls.push(['setPosition', x, y]);
+    return this;
+  }
+
+  setFontSize(v) {
+    this.fontSize = v;
+    this.calls.push(['setFontSize', v]);
+    return this;
+  }
+
+  setOrigin() {
+    return this;
+  }
+
+  setDepth(d) {
+    this.depth = d;
+    return this;
+  }
+
+  destroy() {
+    this.destroyed = true;
+    return this;
+  }
+}
+
 function makeHost() {
   const list = [];
+  const texts = [];
   return {
     list,
+    texts,
     add: {
       graphics: () => {
         const g = new RecordingGraphics(`g${list.length}`);
         list.push(g);
         return g;
+      },
+      // W-07 的大字标题落点：故意放进**独立数组**，避免挪动 list 的图层下标（既有断言用 list[1]/list[3]）
+      text: (x, y, str, style) => {
+        const t = new RecordingText(`t${texts.length}`, style || {});
+        t.x = x;
+        t.y = y;
+        texts.push(t);
+        return t;
       }
     }
   };
@@ -1449,8 +1543,312 @@ function checkEffectSystem(mod, view) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
- * 7 · 浏览器 selftest 负载
+ * 6b · R3 新增：W-07 三要素同帧（经 WorldLayer.sync 驱动）/ W-11 核心可辨 / W-12 假节拍
  * ═══════════════════════════════════════════════════════════════ */
+
+const WHITE = COLORS.white.int;
+const opColor = (o) => (o && o.style ? o.style.color : null);
+const whiteOps = (g) => g.ops.filter((o) => opColor(o) === WHITE);
+const fullScreenRects = (g, view) => g.ops.filter((o) => o.op === 'fillRect' && o.x === 0 && o.y === 0 && Math.abs(o.w - view.width) < 0.01 && Math.abs(o.h - view.height) < 0.01);
+const triShards = (g) => g.ops.filter((o) => o.op === 'fillPoints' && o.pts && o.pts.length === 3);
+const lineOps = (g) => g.ops.filter((o) => o.op === 'line');
+
+function renderObstacleLayer(view, nowSec, list) {
+  const g = new RecordingGraphics('coreLayer');
+  for (const it of list) {
+    const o = new Obstacle(it);
+    o.update(nowSec, view);
+    o.render(g, view);
+  }
+  return g;
+}
+
+function renderTimelineLayer(view, nowSec, list) {
+  const g = new RecordingGraphics('coreLower');
+  new Timeline().draw(g, { nowSec, view, instances: list });
+  return g;
+}
+
+function bboxOf(ops) {
+  const pts = [];
+  for (const o of ops) {
+    if (o.op === 'fillPoints' || o.op === 'strokePoints') for (const p of o.pts) pts.push(p);
+  }
+  if (!pts.length) return null;
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const p of pts) {
+    minX = Math.min(minX, p.x);
+    maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y);
+    maxY = Math.max(maxY, p.y);
+  }
+  return { pts, minX, maxX, minY, maxY, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 };
+}
+
+/** 端点是否落在包围盒外（留 0.5px 容差；角括号的「空间通道」就靠这个可数的事实） */
+function outsideBBox(x, y, bb, pad = 0.5) {
+  return x < bb.minX - pad || x > bb.maxX + pad || y < bb.minY - pad || y > bb.maxY + pad;
+}
+const outsideSeg = (s, bb) => outsideBBox(s.x1, s.y1, bb) && outsideBBox(s.x2, s.y2, bb);
+const outsideOp = (o, bb) => outsideSeg(o, bb);
+
+/** W-11：核心 vs 非核心的独立视觉编码（含「灰度化后仍能一眼指出」的可数/空间/明度三通道） */
+function checkCoreIdentity(view, clock) {
+  const id = 'render:core';
+  group(id, 'W-11 核心节点独立编码 + 灰度可辨 + 非核心无 hp 暗示');
+  const nowSec = clock.timeAtBeat(43);
+  let minDelta = Infinity;
+  const notes = [];
+  for (const t of TRACKS) {
+    const coreG = renderObstacleLayer(view, nowSec, [inst(t, 44, { core: true })]);
+    const plainG = renderObstacleLayer(view, nowSec, [inst(t, 44, { core: false })]);
+    must(id, `${t}：两层都画出了东西`, coreG.ops.length > 0 && plainG.ops.length > 0, `core=${coreG.ops.length} ops / plain=${plainG.ops.length} ops`);
+    const coreWhite = whiteOps(coreG);
+    const plainWhite = whiteOps(plainG);
+    must(id, `${t}：非核心节点 0 处白墨（255 级灰度）`, plainWhite.length === 0, `白墨 ${plainWhite.length} 处（期望 0）`);
+    must(id, `${t}：核心节点有白墨描边+中心点+角括号`, coreWhite.length >= 10, `白墨 ${coreWhite.length} 处（≥10 = 描边1 + 点1 + 括号8）`);
+    const coreMax = Math.max(...coreG.ops.map((o) => perceptualLuma(opColor(o))));
+    const plainMax = Math.max(...plainG.ops.map((o) => perceptualLuma(opColor(o))));
+    const delta = coreMax - plainMax;
+    minDelta = Math.min(minDelta, delta);
+    notes.push(`${t}:${Math.round(plainMax)}→${Math.round(coreMax)}`);
+    must(id, `${t}：灰度 Δ(核心,非核心) ≥ ${GRAY_CONTRAST_MIN}`, delta >= GRAY_CONTRAST_MIN, `${Math.round(plainMax)} → ${Math.round(coreMax)}，Δ${Math.round(delta)}（门限 ${GRAY_CONTRAST_MIN}，0..255）`);
+    // 空间通道：4 个角括号必须整体落在字形包围盒之外（去色、去亮度差后仍可分辨）
+    const glyphBBox = bboxOf(whiteOps(coreG).filter((o) => o.op === 'strokePoints'));
+    const drawnBrackets = whiteOps(coreG).filter((o) => o.op === 'line');
+    eq(id, `${t}：画出的角括号段数 === CORE_MARK.count×2`, drawnBrackets.length, CORE_MARK.count * 2);
+    must(id, `${t}：画出的角括号全部在字形包围盒外`, !!glyphBBox && drawnBrackets.every((o) => outsideOp(o, glyphBBox)), glyphBBox ? `字形盒=[${fmt(glyphBBox.minX, 1)},${fmt(glyphBBox.maxX, 1)}]×[${fmt(glyphBBox.minY, 1)},${fmt(glyphBBox.maxY, 1)}]，8 段端点全在外` : '取不到字形盒');
+    const pure = coreBracketLines(glyphBBox.pts, 40);
+    eq(id, `${t}：coreBracketLines 段数 = count×2（纯几何可数）`, pure.length, CORE_MARK.count * 2);
+    const pureBB = bboxOf([{ op: 'fillPoints', pts: glyphBBox.pts }]);
+    must(id, `${t}：纯几何角括号也在包围盒外（与绘制口径一致）`, pure.every((s) => outsideSeg(s, pureBB)), `pad=${fmt(CORE_MARK.bracketGapRatio, 2)}×half`);
+    must(id, `${t}：非核心节点不画角括号（本体无 hp 暗示）`, coreG.ops.length - plainG.ops.length === CORE_MARK.count * 2 + 2, `Δ${coreG.ops.length - plainG.ops.length} 条 op（= 括号 8 + 描边 1 + 中心点 1）`);
+    // 下层同一套编码（两层不许分叉）
+    const lowCore = renderTimelineLayer(view, nowSec, [inst(t, 44, { core: true })]);
+    const lowPlain = renderTimelineLayer(view, nowSec, [inst(t, 44, { core: false })]);
+    const dLow = whiteOps(lowCore).length - whiteOps(lowPlain).length;
+    const dUp = coreWhite.length - plainWhite.length;
+    eq(id, `${t}：上下层核心增量墨迹同数（永不分叉）`, dLow, dUp);
+    must(id, `${t}：下层非核心也无白墨增量`, dLow >= CORE_MARK.count * 2, `下层核心比非核心多 ${dLow} 处白墨`);
+  }
+  headline.core = `三声部灰度 Δ 最小 ${Math.round(minDelta)}（≥${GRAY_CONTRAST_MIN}）· ${notes.join(' ')}`;
+  must(id, '核心编码不引入第四种颜色（白=系统色 token）', whiteOps(renderObstacleLayer(view, nowSec, [inst('kick', 44, { core: true })])).every((o) => o.style.color === WHITE) && COLOR_HEX_WHITELIST.includes(COLORS.white.hex), `核心墨迹全部 = COLORS.white（${COLORS.white.hex}）`);
+  must(id, 'CORE_MARK.minLumaDelta === GRAY_CONTRAST_MIN（同一门限，不另立）', CORE_MARK.minLumaDelta, GRAY_CONTRAST_MIN);
+  must(id, '实测最小 Δ ≥ CORE_MARK.minLumaDelta', minDelta >= CORE_MARK.minLumaDelta, `最小 Δ${Math.round(minDelta)} ≥ ${CORE_MARK.minLumaDelta}`);
+}
+
+/** W-07/W-08：拆解演出的同帧、按拍、preset 驱动（**全部经 WorldLayer.sync 驱动**，与浏览器接线同一条路径） */
+function checkFxIntegration(view, clock) {
+  const id = 'render:fxFrame';
+  group(id, 'W-07 三要素同帧（WorldLayer.sync 驱动）+ W-08 复活不补发');
+  const q = quality();
+  const nowSec = clock.timeAtBeat(44);
+  const live = [inst('kick', 44, { core: true }), inst('kick', 45), inst('kick', 46), inst('bass', 45), inst('synth', 44)];
+  const host = makeHost();
+  const wl = new WorldLayer();
+  wl.init(host, view);
+  must(id, 'WorldLayer 已内建 EffectSystem（CORE 无需另接线）', !!wl.effects && typeof wl.effects.onDisassemble === 'function', `effects=${wl.effects ? 'yes' : 'NO'}`);
+
+  // 帧 0：先正常同步一帧。**CORE 的调用口径 = 每帧原样下发累积集合（无拆解时是 []）**，
+  // 首轮只采纳不重播（从存档恢复的关卡不该一进场就炸）→ 所以帧 0 要带 []，不能省掉这个键。
+  const f0 = wl.sync({ clock: nowSec, instances: live, view }, { disassembledTracks: [] });
+  must(id, '无事件的帧 0 不画任何演出', f0.fx.ops === 0 && f0.fx.live === 0 && host.texts[0].visible === false, `ops=${f0.fx.ops} live=${f0.fx.live} text.visible=${host.texts[0].visible}`);
+
+  // 帧 1：拆解 kick（★ leader 验收线就是这一句调用形态）
+  const textCalls0 = host.texts[0].calls.length;
+  const f1 = wl.sync({ clock: nowSec, instances: live, view }, { disassembledTracks: ['kick'] });
+  const fxCalls = host.texts[0].calls.length - textCalls0;
+  const st = f1.fx.state;
+  must(id, '三要素在同一帧起（同一条记录）', !!(st.shatter && st.desaturate && st.bigText) && st.sameFrame.sharedRecord, `sharedRecord=${st.sameFrame && st.sameFrame.sharedRecord}`);
+  eq(id, '同帧：碎裂/降饱和/大字的 startSec 全等', `${st.shatter?.startSec}|${st.desaturate?.startSec}|${st.bigText?.startSec}`, `${nowSec}|${nowSec}|${nowSec}`);
+  eq(id, '同帧：三者的 startBeat 全等', `${st.shatter?.startBeat}|${st.desaturate?.startBeat}|${st.bigText?.startBeat}`, `${st.sameFrame?.startBeat}|${st.sameFrame?.startBeat}|${st.sameFrame?.startBeat}`);
+  eq(id, '同帧：三者的 k 全等（此刻都还是 0）', `${st.shatter?.k}|${st.desaturate?.k}|${st.bigText?.k}`, '0|0|0');
+  eq(id, '同帧：触发时刻 = 调用时的 nowSec（没有延后一帧）', st.sameFrame?.startSec, nowSec);
+  must(id, '触发帧三要素都已可见（alpha>0）', st.shatter?.alpha > 0 && st.desaturate?.alpha > 0 && st.bigText?.alpha > 0, `碎裂${fmt(st.shatter?.alpha, 3)} / 降饱和${fmt(st.desaturate?.alpha, 3)} / 大字${fmt(st.bigText?.alpha, 3)}`);
+  const gFx = host.list[3];
+  must(id, '演出画在 fx 层（depth 3，同帧）', gFx != null && gFx.depth === 3 && gFx.ops.length > 0, `fx 层 ${gFx ? gFx.ops.length : 0} 条 op，depth=${gFx && gFx.depth}`);
+  must(id, '① 碎裂：每只在场障碍炸出一片三角碎片', triShards(gFx).length === 3 * q.particlesPerBurst, `${triShards(gFx).length} 片 = 在场 3 只 × ${q.particlesPerBurst} 粒（quiet 档）`);
+  must(id, '② 降饱和：满屏 base 叠印（整幅 fillRect）', fullScreenRects(gFx, view).some((o) => o.style.color === COLORS.base.int), `满屏叠印 ${fullScreenRects(gFx, view).length} 块`);
+  must(id, '① 整屏裂纹横贯画布（全屏碎裂，不是判定点）', lineOps(gFx).length >= FX_TIMING.crackCount * 2, `裂纹 ${lineOps(gFx).length} 段（= ${FX_TIMING.crackCount}×2 折线）`);
+  must(id, '③ 大字：同一帧落到 text 对象', host.texts[0].visible === true && host.texts[0].text === '鼓 · 已拆解' && host.texts[0].alpha > 0, `text=「${host.texts[0].text}」 alpha=${fmt(host.texts[0].alpha, 3)} scale=${host.texts[0].scaleX}`);
+  must(id, '大字字号 = FONT_TIERS.display 阶（不许自创字号）', host.texts[0].fontSize, view.fontPx.display);
+  must(id, '三要素落地在同一次 sync 内（不跨帧）', fxCalls === 6 && gFx.ops.length > 0, `这次 sync 对 text 下了 ${fxCalls} 条指令（ setText/显/隐/alpha/scale/pos/size 各 1），同时 fx 层有 ${gFx.ops.length} 条 op`);
+  eq(id, '一次拆解 = 一条事件（绝不逐帧重播）', wl.effects.stats.disassembles, 1);
+
+  // 帧 2..4：同一集合重复下发（只播一次，但碎片必须继续随拍位飞）
+  const f4 = wl.sync({ clock: nowSec + view.beatSec * 0.3, instances: live, view }, { disassembledTracks: ['kick'] });
+  wl.sync({ clock: nowSec + view.beatSec * 0.45, instances: live, view }, { disassembledTracks: ['kick'] });
+  const f6 = wl.sync({ clock: nowSec + view.beatSec * 0.6, instances: live, view }, { disassembledTracks: ['kick'] });
+  eq(id, '重复下发不再新增事件', wl.effects.stats.disassembles, 1);
+  must(id, '碎片随拍位外扩（是时间函数，不是静止贴图）', f6.fx.state.shatter.k > f4.fx.state.shatter.k && f6.fx.state.shatter.k < 1, `k: ${fmt(f4.fx.state.shatter.k, 4)} → ${fmt(f6.fx.state.shatter.k, 4)}`);
+  must(id, '演出时长用拍表达 → 0.6 拍时 k = 0.6/寿命', Math.abs(f6.fx.state.shatter.k - 0.6 / FX_TIMING.shatterBeats) < 1e-9, `k=${fmt(f6.fx.state.shatter.k, 6)} = 0.6拍 / ${FX_TIMING.shatterBeats}拍`);
+
+  // 归零后 fx 层应清空（三要素全部播完：寿命取三者最长的拍系数 + 余量）
+  const lifeBeats = Math.max(FX_TIMING.shatterBeats, quality().desaturateBeats, quality().bigTextBeats) + 0.5;
+  const fEnd = wl.sync({ clock: nowSec + view.beatSec * lifeBeats, instances: live, view }, { disassembledTracks: ['kick'] });
+  must(id, '碎裂寿命走完后粒子归 0、大字隐藏', fEnd.fx.live === 0 && host.texts[0].visible === false, `live=${fEnd.fx.live} text.visible=${host.texts[0].visible}`);
+
+  // W-08 复活：自当前拍之后恢复、不补发、hp 回 1
+  const revBeat = 47;
+  const revInst = inst('kick', revBeat, { state: 'revived' });
+  const tRev = clock.timeAtBeat(46);
+  const fRev = wl.sync({ clock: tRev, instances: [revInst], view }, { disassembledTracks: [], revivedIds: [revInst.id] });
+  const rv = fRev.fx.state.revive;
+  must(id, '复活演出被驱动起来（不是空实现）', !!rv && rv.k < 1, `revive=${rv ? `k${fmt(rv.k, 3)}` : 'null'}`);
+  near(id, '不补发历史：扫回起点 = 判定线 x', rv.x0, view.judgeX, EXACT_TOL_PX);
+  must(id, '自当前拍之后恢复：复活实例的拍位在 now 之后', revInst.beat > view.timeToBeat(tRev), `${revInst.beat} > nowBeat ${fmt(view.timeToBeat(tRev), 2)}`);
+  eq(id, 'hp 显示回 1（不是 4）', rv.hpDisplay, FX_TIMING.reviveHpDisplay);
+  eq(id, 'FX_TIMING.reviveHpDisplay === 1（C3 批复的登记值）', FX_TIMING.reviveHpDisplay, 1);
+  must(id, '扫回前沿随拍位右推', rv.x1 >= view.judgeX && rv.x1 <= windowRightX(view) + 1, `x1=${fmt(rv.x1, 1)} ∈ [判定线, 出生线 ${fmt(windowRightX(view), 1)}]`);
+
+  // 判定事件驱动：PERFECT / MISS / 空拍
+  const hostJ = makeHost();
+  const wj = new WorldLayer();
+  wj.init(hostJ, view);
+  const jd = inst('bass', 45);
+  wj.sync({ clock: nowSec, instances: [jd], view }, {});
+  wj.sync({ clock: nowSec, instances: [jd], view }, { judgment: { grade: 'PERFECT', obstacleId: jd.id, track: 'bass', type: 'platform', isCore: true, actionMatch: true, deltaMs: 8, rule: 'window', penalizes: true } });
+  const sPer = wj.effects.probe();
+  must(id, 'PERFECT：粒子数 ≤ preset 上限', sPer.burst && sPer.burst.live <= q.particlesLiveMax, `burst=${sPer.burst ? sPer.burst.live : 0} ≤ ${q.particlesLiveMax}（PRD 22 粒属 standard 档）`);
+  must(id, 'PERFECT：判定线金闪（白墨竖线）', whiteOps(hostJ.list[3]).some((o) => o.op === 'line'), `白墨线 ${whiteOps(hostJ.list[3]).filter((o) => o.op === 'line').length} 段`);
+  eq(id, '顿帧：quiet 档 frameHoldBeats=0 ⇒ WORLD 不擅自冻结时序', sPer.hitStop.beats, q.frameHoldBeats);
+  const before = wj.effects.events.length;
+  wj.sync({ clock: nowSec + 0.01, instances: [jd], view }, { judgment: { grade: 'MISS', rule: 'emptyBeat', obstacleId: null, penalizes: false, actionMatch: false, deltaMs: 0 } });
+  eq(id, '空拍（CR-08）= 演出 no-op', wj.effects.events.length, before);
+  const missInst = inst('synth', 45);
+  const fMiss = wj.sync({ clock: nowSec + 0.02, instances: [missInst], view }, { judgment: { grade: 'MISS', obstacleId: missInst.id, track: 'synth', type: 'barrage', isCore: true, actionMatch: true, deltaMs: 120, rule: 'timeout', penalizes: true } });
+  const sMiss = wj.effects.probe();
+  must(id, 'MISS：红 vignette 叠印存在且只用 kick 红 token', sMiss.vignette && sMiss.vignette.alpha > 0 && hostJ.list[3].ops.some((o) => o.op === 'fillRect' && o.style.color === COLORS.kick.int), `vignette alpha=${fmt(sMiss.vignette ? sMiss.vignette.alpha : 0, 3)}`);
+  const sh = { x: hostJ.list[1].x, y: hostJ.list[1].y };
+  must(id, 'MISS：震屏把位移**赋**给各层（是时间的函数，不是积分累加）', Math.hypot(sh.x, sh.y) > 0 && fMiss.fx.shake > 0 && Math.hypot(sh.x, sh.y) <= Math.min(q.shakeMaxPx, QUALITY_CAPS.shakeMaxPx), `dx=${fmt(sh.x, 3)} dy=${fmt(sh.y, 3)}（|Δ|=${fmt(fMiss.fx.shake, 3)} ≤ min(preset ${q.shakeMaxPx}, cap ${QUALITY_CAPS.shakeMaxPx})）`);
+  must(id, 'MISS：各层同步位移（同一 dx/dy，两层不许分叉）', hostJ.list[0].x === sh.x && hostJ.list[2].x === sh.x && hostJ.list[3].y === sh.y, 'bg/障碍/角色/fx 四层拿到的是同一个位移赋值');
+  wj.sync({ clock: nowSec + 0.02 + MOTION.shakeBeats * view.beatSec + 0.01, instances: [missInst], view }, {});
+  must(id, '震屏走完后各层位移归 0（不残留）', hostJ.list[1].x === 0 && hostJ.list[1].y === 0, `(${fmt(sh.x, 2)},${fmt(sh.y, 2)}) → (0,0)`);
+
+  // 按拍而非按毫秒：110 vs 150 的同一拍数演出
+  const vA = viewWithClock(BASE.w, BASE.h, clockAt(110), 60 / 110);
+  const vB = viewWithClock(BASE.w, BASE.h, clockAt(150), 60 / 150);
+  const fx110 = new (wl.effects.constructor)({});
+  const fx150 = new (wl.effects.constructor)({});
+  fx110.layout(vA);
+  fx150.layout(vB);
+  const oA = fx110.onDisassemble({ track: 'kick', atSec: 0 }, 0, vA);
+  const oB = fx150.onDisassemble({ track: 'kick', atSec: 0 }, 0, vB);
+  must(id, '同一拍数演出在两关等长（k 相同）', Math.abs(oA.desaturate.k - oB.desaturate.k) < 1e-12 && Math.abs(oA.bigText.k - oB.bigText.k) < 1e-12, `k=${oA.desaturate.k}/${oB.desaturate.k}`);
+  near(id, '秒数随拍长缩放（0.545s vs 0.4s）', oA.desaturate.sec / oB.desaturate.sec, vA.beatSec / vB.beatSec, 1e-9, '×');
+  eq(id, '拍系数在两关相同（写死 ms 就会在这里红）', oA.desaturate.beats, oB.desaturate.beats);
+  const pA = fx110.stateAt(q.desaturateBeats * vA.beatSec, vA);
+  const pB = fx150.stateAt(q.desaturateBeats * vB.beatSec, vB);
+  must(id, '走完 preset 拍数后两关同时结束', pA.desaturate.done === true && pB.desaturate.done === true && pA.shatter.done === pB.shatter.done, `@110 ${fmt(pA.desaturate.k, 3)} / @150 ${fmt(pB.desaturate.k, 3)}`);
+
+  // 三档审美 + 上限
+  const perPreset = {};
+  for (const name of Object.keys(QUALITY_PRESETS)) {
+    const f = new (wl.effects.constructor)({ quality: name });
+    const gh = new RecordingGraphics(`fx-${name}`);
+    const out = f.onDisassemble({ track: 'kick', atSec: 1 }, 1, view);
+    f.draw(gh, { nowSec: 1, view });
+    const pq = quality(name);
+    perPreset[name] = { shards: triShards(gh).length, live: out.shatter.live, full: fullScreenRects(gh, view).length, bloomLayers: pq.bloomLayers };
+    must(id, `${name} 档：粒子 ≤ preset ≤ 硬上限`, out.shatter.live <= pq.particlesLiveMax && pq.particlesLiveMax <= QUALITY_CAPS.particlesLiveMax, `live=${out.shatter.live} ≤ ${pq.particlesLiveMax} ≤ ${QUALITY_CAPS.particlesLiveMax}`);
+    must(id, `${name} 档：bloom 只在 preset 允许时叠印`, (perPreset[name].full > 1) === (pq.bloomLayers > 0), `满屏级叠印 ${perPreset[name].full} 块（bloomLayers=${pq.bloomLayers}）`);
+  }
+  must(id, '三档强度互不相同（T16 不许独断）', new Set(Object.values(perPreset).map((p) => p.shards)).size === 3, Object.entries(perPreset).map(([k, p]) => `${k}=${p.shards}片/${p.full}叠印`).join(' '));
+  const quietA = quality('quiet'), vividA = quality('vivid');
+  must(id, '光敏安全档的叠印强度更低（PERF-05 ③）', quietA.flashReductionSafe === true && vividA.flashReductionSafe === false && perPreset.quiet.live < perPreset.vivid.live, `quiet safe=${quietA.flashReductionSafe} vivid safe=${vividA.flashReductionSafe}`);
+  const off = new (wl.effects.constructor)({ enabled: false });
+  off.layout(view);
+  const offOut = off.onDisassemble({ track: 'kick', atSec: 1 }, 1, view);
+  const offG = new RecordingGraphics('fxOff');
+  const offDraw = off.draw(offG, { nowSec: 1, view });
+  must(id, '演出可整档关闭（拆解总开关 = 光敏）', offOut.shatter === null && off.liveCount(1, view) === 0 && offDraw.drawn === 0 && offG.ops.length === 0, `shatter=${offOut.shatter} live=${off.liveCount(1, view)} 画出 ${offG.ops.length} 条 op`);
+  wl.shutdown();
+  wj.shutdown();
+  headline.fx = `同帧三要素=${st.sameFrame.sharedRecord ? '✓' : '×'} ${triShards(gFx).length}片/${fullScreenRects(gFx, view).length}叠印/「${host.texts[0].text}」；110↔150 拍系数等值`;
+}
+
+/** W-12：假节拍只渲染在下层 + 跨度按拍 + 变速预告读 clock.getTempoCues() */
+function checkGhostLayer(view, clock) {
+  const id = 'render:ghost';
+  group(id, 'W-12 假节拍只在下层 + lengthBeats 按拍 + 变速预告读 cues');
+  const src = [
+    { beat: 40, offsetBeats: 0.5, lengthBeats: 2 },
+    { beat: 42, lengthBeats: 1 },
+    { beat: 44, offsetBeats: 0.5, lengthBeats: 1.5, glitch: true },
+    { beat: 46, lengthBeats: 2, glitch: true },
+    { beat: 48, lengthBeats: 1 },
+    { beat: 50, lengthBeats: 1, glitch: true },
+    { beat: 52, lengthBeats: 2 },
+    { beat: 54, lengthBeats: 1 },
+    { beat: 56, lengthBeats: 1 },
+    { beat: 58, lengthBeats: 2 }
+  ];
+  const gs = normalizeGhosts(src);
+  must(id, `条数被 ghostMax=${TIMELINE_CFG.ghostMax} 截住（L-06 预砍口径）`, gs.length === TIMELINE_CFG.ghostMax, `${gs.length} 条（输入 ${src.length}）`);
+  must(id, 'lengthBeats 原样进渲染层（CR-12：不换算秒）', gs[0].lengthBeats === 2 && gs[2].lengthBeats === 1.5, `[${gs.map((g) => g.lengthBeats).join(',')}]`);
+  must(id, 'lengthBeats 越界被削（SOUND gate 的镜像）', normalizeGhosts([{ beat: 40, lengthBeats: 9 }])[0].lengthBeats === TIMELINE_CFG.ghostLenMaxBeats, `9 拍 → ${TIMELINE_CFG.ghostLenMaxBeats}`);
+  const nowBeat = 42;
+  const nowSec = beatToTimeOf(view, nowBeat);
+  for (const g of gs.slice(0, 3)) {
+    const geo = ghostGeometry(view, { beat: g.beat, offsetBeats: g.offsetBeats, lengthBeats: g.lengthBeats }, nowBeat);
+    near(id, `ghost@${g.beat} 跨度 = ${g.lengthBeats}拍 × pxPerBeat`, geo.spanPx, g.lengthBeats * view.pxPerBeat, 0.02);
+    eq(id, `ghost@${g.beat} 跨度与拍数换算同式（beatOffsetX）`, geo.spanPx, beatOffsetX(view, g.beat + g.offsetBeats + g.lengthBeats - nowBeat) - beatOffsetX(view, g.beat + g.offsetBeats - nowBeat));
+  }
+  const tl = new Timeline({ ghostBeats: src });
+  const gTl = new RecordingGraphics('ghostOnly');
+  const stats = tl.draw(gTl, { nowSec, view, instances: [] });
+  must(id, '下层确实画出了假标记', stats.ghosts > 0, `本帧 ${stats.ghosts} 条`);
+  const only = new RecordingGraphics('ghostOnly2');
+  tl.drawGhostMarkers(only, view, nowBeat);
+  const glitchLines = only.ops.filter((o) => opColor(o) === WHITE);
+  must(id, '故障闪烁处数 ≤ ghostGlitchMax', new Set(glitchLines.map((o) => Math.round(o.x1))).size <= TIMELINE_CFG.ghostGlitchMax, `${new Set(glitchLines.map((o) => Math.round(o.x1))).size} 处白扫描线 ≤ ${TIMELINE_CFG.ghostGlitchMax}`);
+  must(id, '假标记绝不用声部色（不会被误读成真事件）', only.ops.every((o) => opColor(o) === COLORS.system.int || opColor(o) === WHITE), `${only.ops.length} 条 op 只有系统青/白两种色`);
+  must(id, '假标记绝不进判定/音频：本模块不认识 judgable', !/judgable|Judge|clock/.test(String(tl.drawGhostMarkers)), 'drawGhostMarkers 不引用判定/时钟（渲染层唯一职责）');
+  // 只在下层：上层（障碍层 + 演出层）一个假标记都没有
+  const host = makeHost();
+  const wl = new WorldLayer();
+  wl.init(host, view);
+  wl.sync({ clock: nowSec, instances: [inst('kick', 44), inst('bass', 45)], view }, {});
+  const upper = host.list[1].ops.concat(host.list[3].ops);
+  must(id, '上层 0 处菱形假标记（只在下层时间轴）', upper.filter((o) => (o.op === 'strokePoints' || o.op === 'fillPoints') && o.pts && o.pts.length === 4 && opColor(o) === COLORS.system.int).length === 0, `上层 ${upper.length} 条 op，菱形假标记 0 处`);
+  must(id, '上层不含系统色描边（假标记没漏进世界里）', host.list[1].ops.every((o) => opColor(o) !== COLORS.system.int), `障碍层系统色 op = 0`);
+  // 变速关：按拍等距仍然成立（L4 120→140）
+  const tcView = viewWithClock(BASE.w, BASE.h, clockAt(120, [{ beat: 64, bpm: 140, transitionBeats: 6 }]), 0.5);
+  const nb = tcView.timeToBeat(tcView.beatToTime(60));
+  const a = ghostGeometry(tcView, { beat: 59, offsetBeats: 0.5, lengthBeats: 2 }, nb);
+  const b = ghostGeometry(tcView, { beat: 61, offsetBeats: 0.5, lengthBeats: 2 }, nb);
+  near(id, '变速点两侧 ghost 仍按拍等距（Δ=2拍×pxPerBeat）', b.x - a.x, 2 * tcView.pxPerBeat, 0.05);
+  must(id, '假标记不吃秒域公式（否则变速后会漂）', Math.abs(a.x - beatOffsetX(tcView, 59 + 0.5 - nb)) < 0.01, `x=${fmt(a.x, 2)} = beatOffsetX(拍域)`);
+  // 变速视觉预告：数据源 = CORE 的 clock.getTempoCues()（CR-08 批复：WORLD 不自行推算）
+  // 这里用**契约桩**（形状逐字段照 C1/CR-08），这样 SOUND 的 BeatClock 怎么改都不影响本门禁
+  const cueData = [{ beat: 64, targetBeat: 70, bpmFrom: 120, bpmTo: 140, timeSec: 32, targetTimeSec: 35.0 }];
+  const cueClock = { getTempoCues: () => cueData.map((c) => ({ ...c })), beatAt: (t) => t / 0.5, timeAtBeat: (b) => b * 0.5 };
+  const cues = normalizeTempoCues(cueClock);
+  must(id, 'cue 直接读自 clock.getTempoCues()（不是本层算的）', cues.length === 1 && cueData.length === 1, `${cues.length} 条：${JSON.stringify(cues[0])}`);
+  eq(id, 'cue 的 targetBeat/bpmTo 原样透传（不换算、不四舍五入）', `${cues[0].targetBeat}/${cues[0].bpmTo}`, '70/140');
+  const tl4 = new Timeline({ clock: cueClock });
+  eq(id, 'Timeline 拿到 clock 就能建出预告（setTempoCues 同源）', tl4.setTempoCues(cueClock), cues.length);
+  const g4 = new RecordingGraphics('tempo');
+  const s4 = tl4.draw(g4, { nowSec: cueClock.timeAtBeat(60), view: tcView, instances: [] });
+  must(id, '变速预告在本帧画出来了', s4.tempoCues === 1, `stats.tempoCues=${s4.tempoCues}`);
+  const geo4 = tempoCueGeometry(tcView, cues[0], tcView.timeToBeat(cueClock.timeAtBeat(60)));
+  near(id, '预告区间 = [beat, targetBeat] 的拍距 × pxPerBeat', geo4.spanPx, geo4.beats * tcView.pxPerBeat, 0.05);
+  eq(id, '预告区间拍距 = targetBeat − beat（6 拍过渡）', geo4.beats, 6);
+  must(id, '预告只画一次 chevron（无自算的第二个变速点）', g4.ops.filter((o) => o.style.color === COLORS.system.int && o.op === 'line').length <= TIMELINE_CFG.tempoCueChevrons + 4, `${g4.ops.length} 条 op / ${TIMELINE_CFG.tempoCueChevrons} 个箭头`);
+  const tlEmpty = new Timeline({ ghostBeats: [] });
+  const g5 = new RecordingGraphics('noTempo');
+  const s5 = tlEmpty.draw(g5, { nowSec: cueClock.timeAtBeat(70), view: tcView, instances: [] });
+  must(id, '无 cue / cue 出窗 → 一条都不画（不许自己推算）', s5.tempoCues === 0 && tlEmpty.tempoCues.length === 0, `tempoCues=${tlEmpty.tempoCues.length}`);
+  eq(id, 'normalizeTempoCues 对非时钟输入返回空（防御）', normalizeTempoCues(null).length, 0);
+  eq(id, 'normalizeTempoCues 接受 cues 数组原样', normalizeTempoCues([{ beat: 10, targetBeat: 16, bpmFrom: 120, bpmTo: 140 }]).length, 1);
+  eq(id, '把缺 targetBeat 的残缺 cue 归一成零宽度（绝不猜过渡长度）', normalizeTempoCues([{ beat: 10, bpmTo: 140 }])[0].targetBeat, 10);
+  wl.shutdown();
+  headline.ghost = `${gs.length}条/跨度按拍(${fmt(gs[0].lengthBeats, 1)}拍=${fmt(ghostGeometry(view, gs[0], nowBeat).spanPx, 1)}px)/cues=${cues.length}`;
+}
+
 
 export const SELFTEST_SCHEMA = 'world-selftest/v1';
 
@@ -1592,6 +1990,12 @@ export async function run(opts = {}) {
   checkPlayer(optional.get('player'), view, clock);
   checkEffectSystem(optional.get('fx'), view);
   mark('optional modules');
+  checkCoreIdentity(view, clock);
+  mark('core identity');
+  checkFxIntegration(view, clock);
+  mark('fx same-frame');
+  checkGhostLayer(view, clock);
+  mark('ghost layer');
 
   {
     const id = 'render:selftest';

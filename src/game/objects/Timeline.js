@@ -110,7 +110,11 @@ export function ghostRenderX(view, ghost, nowBeat) {
   return list.map((gh) => beatX(view, gh.beat + gh.offsetBeats, nowBeat));
 }
 
-/** 归一化 C5 的 ghostBeats：`[{beat,offsetBeats}]` 或 `[40]` 或 `[{b:40,d:0.5}]` */
+/**
+ * 归一化 C5 的 ghostBeats：`[{beat,offsetBeats,lengthBeats}]` 或 `[40]` 或 `[{b:40,d:0.5}]`
+ * W-12 / CR-12 批复：`lengthBeats` 是**渲染时长的唯一真相**（1–2 拍，由 SOUND 的 gate 保证），
+ * 这里只把它换算成拍域跨度，**绝不自算秒**（变速关会脱钩 = 失败模式 3）。
+ */
 export function normalizeGhosts(ghosts) {
   const arr = Array.isArray(ghosts) ? ghosts : [];
   const out = [];
@@ -120,15 +124,73 @@ export function normalizeGhosts(ghosts) {
     if (!Number.isFinite(beat)) continue;
     const offsetBeats =
       typeof g === 'number' ? 0.5 : Number(g.offsetBeats != null ? g.offsetBeats : g.d != null ? g.d : 0.5);
+    const rawLen = Number(g.lengthBeats != null ? g.lengthBeats : g.len != null ? g.len : TIMELINE_CFG.ghostLenBeats);
+    const lengthBeats = Math.min(TIMELINE_CFG.ghostLenMaxBeats, Math.max(0.25, Number.isFinite(rawLen) ? rawLen : TIMELINE_CFG.ghostLenBeats));
     out.push({
       beat,
       offsetBeats,
+      lengthBeats,
       glitch: !!g.glitch,
       lane: g.lane == null ? null : g.lane | 0
     });
     if (out.length >= TIMELINE_CFG.ghostMax) break;
   }
   return out;
+}
+
+/**
+ * W-12 变速视觉预告的输入归一化：**只读** CORE 的 `clock.getTempoCues()`（CR-08 批复：WORLD 不自行推算）。
+ * 缺函数/缺字段 → 返回空数组（画不出预告，也绝不猜）。
+ * @param {object[]|{getTempoCues:Function}|null} src cues 数组，或 BeatClock 本体
+ */
+export function normalizeTempoCues(src) {
+  let list = null;
+  if (Array.isArray(src)) list = src;
+  else if (src && typeof src.getTempoCues === 'function') list = src.getTempoCues();
+  else if (src && Array.isArray(src.cues)) list = src.cues;
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const c of list) {
+    if (!c) continue;
+    const beat = Number(c.beat);
+    const targetBeat = Number(c.targetBeat != null ? c.targetBeat : NaN);
+    if (!Number.isFinite(beat)) continue;
+    out.push({
+      beat,
+      targetBeat: Number.isFinite(targetBeat) ? targetBeat : beat,
+      timeSec: Number(c.timeSec),
+      targetTimeSec: Number(c.targetTimeSec),
+      bpmFrom: Number(c.bpmFrom),
+      bpmTo: Number(c.bpmTo != null ? c.bpmTo : c.toBpm)
+    });
+  }
+  return out;
+}
+
+/**
+ * 单个假标记的几何（导出给断言：跨度 = lengthBeats × pxPerBeat，**按拍**而非按秒）
+ * @returns {{beat:number, offsetBeats:number, x:number, x1:number, spanPx:number, beats:number, pxPerBeat:number}}
+ */
+export function ghostGeometry(view, ghost, nowBeat) {
+  const gh = normalizeGhosts([ghost])[0];
+  const v = resolveView(view);
+  const x = beatX(v, gh.beat + gh.offsetBeats, nowBeat);
+  const x1 = beatX(v, gh.beat + gh.offsetBeats + gh.lengthBeats, nowBeat);
+  return { beat: gh.beat, offsetBeats: gh.offsetBeats, x, x1, spanPx: x1 - x, beats: gh.lengthBeats, pxPerBeat: v.pxPerBeat };
+}
+
+/**
+ * 变速预告的几何（导出给断言：唯一数据源是 CORE 的 `clock.getTempoCues()`）
+ * @returns {{x0:number, x1:number, spanPx:number, beats:number, cue:object}|null}
+ */
+export function tempoCueGeometry(view, cue, nowBeat) {
+  const list = normalizeTempoCues([cue]);
+  if (!list.length) return null;
+  const c = list[0];
+  const v = resolveView(view);
+  const x0 = beatX(v, c.beat, nowBeat);
+  const x1 = beatX(v, c.targetBeat, nowBeat);
+  return { x0, x1, spanPx: x1 - x0, beats: c.targetBeat - c.beat, cue: c, pxPerBeat: v.pxPerBeat };
 }
 
 // ---------------------------------------------------------------------------
@@ -141,16 +203,18 @@ export class Timeline {
    * @param {string[]} [opts.tracks] 泳道集合（默认三声部；关配置可去掉 hp:0 的轨）
    * @param {boolean} [opts.guides=true] 辅助线开关（TIM-05）
    * @param {object[]} [opts.ghostBeats] C5 的 ghostBeats（W-12）
+   * @param {object[]|object} [opts.tempoCues] CORE 的 `clock.getTempoCues()` 结果或 clock 本体（W-12 变速预告）
    */
   constructor(opts = {}) {
     this.opts = opts;
     this.tracks = sanitizeTracks(opts.tracks);
     this.guidesOn = opts.guides !== false;
     this.ghosts = normalizeGhosts(opts.ghostBeats || []);
+    this.tempoCues = normalizeTempoCues(opts.tempoCues || opts.clock || []);
     this.alignTriggerSec = null;
     this.coreIds = new Set(opts.coreIds || []);
     this.enabled = opts.enabled !== false;
-    this.stats = { markers: 0, ticks: 0, ghosts: 0 };
+    this.stats = { markers: 0, ticks: 0, ghosts: 0, tempoCues: 0 };
   }
 
   setGuides(on) {
@@ -160,6 +224,12 @@ export class Timeline {
   /** W-12：换关时注入假节拍（只影响本层的视觉标记） */
   setGhostBeats(ghosts) {
     this.ghosts = normalizeGhosts(ghosts);
+  }
+
+  /** W-12：注入变速预告数据（**唯一来源 = CORE 的 clock.getTempoCues()**，本层不自行推算拍长） */
+  setTempoCues(cuesOrClock) {
+    this.tempoCues = normalizeTempoCues(cuesOrClock || []);
+    return this.tempoCues.length;
   }
 
   /** W-06：障碍到线的瞬间调用（CORE 的 Judgment 或拍事件驱动），本帧起按拍衰减 */
@@ -176,20 +246,22 @@ export class Timeline {
   /**
    * ★ 唯一绘制入口（每帧现画，全部几何来自 nowSec + instances）
    * @param {object} g Phaser Graphics
-   * @param {{nowSec:number, instances?:object[], view:object, beatSec?:number, hpByTrack?:Record<string,number>}} frame
+   * @param {{nowSec:number, instances?:object[], view:object, beatSec?:number, hpByTrack?:Record<string,number>, tempoCues?:object[]|object}} frame
    */
   draw(g, frame) {
     if (!this.enabled) return this.stats;
     const view = resolveView(frame.view);
     const nowSec = Number(frame.nowSec);
     const nowBeat = timeToBeatOf(view, nowSec);
-    this.stats = { markers: 0, ticks: 0, ghosts: 0, nowBeat };
+    this.stats = { markers: 0, ticks: 0, ghosts: 0, tempoCues: 0, nowBeat };
+    if (frame.tempoCues || frame.clock) this.tempoCues = normalizeTempoCues(frame.tempoCues || frame.clock);
 
     this.drawBand(g, view);
     if (this.guidesOn) this.drawBeatGrid(g, view, nowBeat);
     this.drawLanes(g, view);
     this.drawWindow(g, view);
     this.drawMarkers(g, view, nowBeat, frame.instances || []);
+    if (this.tempoCues.length) this.drawTempoCues(g, view, nowBeat);
     if (this.ghosts.length) this.drawGhostMarkers(g, view, nowBeat);
     this.drawJudgeLine(g, view, frame);
     this.drawAlignDash(g, view, nowSec);
@@ -278,16 +350,32 @@ export class Timeline {
     }
   }
 
-  /** W-12：假节拍标记（空心菱形 + 故障偏移。**不进判定队列**，见 TIM-04） */
+  /**
+   * W-12：假节拍标记（**只渲染在本层**：不进判定队列、不进音频，见 TIM-04 / §11 L5）
+   * 跨度 = lengthBeats × pxPerBeat（按拍等距 → L4 变速后仍与真拍位对齐）
+   * 故障闪烁 = 拍域的确定性明暗律（不是 ms tween），最多 ghostGlitchMax 处。
+   */
   drawGhostMarkers(g, view, nowBeat) {
     let glitchUsed = 0;
     for (const gh of this.ghosts) {
       const x = beatX(view, gh.beat + gh.offsetBeats, nowBeat);
-      if (x < 0 || x > view.width) continue;
+      const x1 = beatX(view, gh.beat + gh.offsetBeats + gh.lengthBeats, nowBeat);
+      if (x1 < 0 || x > view.width) continue;
       const wantGlitch = gh.glitch !== false && glitchUsed < TIMELINE_CFG.ghostGlitchMax;
       if (wantGlitch) glitchUsed++;
-      drawGhost(g, view, x, gh, nowBeat, wantGlitch);
+      drawGhost(g, view, x, gh, nowBeat, wantGlitch, x1);
       this.stats.ghosts++;
+    }
+  }
+
+  /** W-12：变速视觉预告（数据源 = CORE 的 clock.getTempoCues()；本层只读不算） */
+  drawTempoCues(g, view, nowBeat) {
+    for (const cue of this.tempoCues) {
+      const x0 = beatX(view, cue.beat, nowBeat);
+      const x1 = beatX(view, cue.targetBeat, nowBeat);
+      if (x1 < -view.pxPerBeat || x0 > view.width + view.pxPerBeat) continue;
+      drawTempoRamp(g, view, x0, x1, cue, nowBeat);
+      this.stats.tempoCues++;
     }
   }
 
@@ -363,23 +451,81 @@ function drawLegend(g, track, view, x, y) {
   drawTrackShape(g, { track, cx: x, cy: y, size, core: false, alpha: ALPHA.legend, stroke: false });
 }
 
-/** 假节拍标记：空心 + 轻微故障横移，用系统色（**绝不用声部色**，避免被误读成真事件） */
-function drawGhost(g, view, x, gh, nowBeat, glitch) {
+/** 假节拍的故障闪烁律（拍域确定性函数：同一拍序列永远闪同样的位置，可截图复现） */
+function ghostFlicker(gh, nowBeat) {
+  const w = Math.sin((nowBeat + gh.beat) * Math.PI * (2 / Math.max(0.25, TIMELINE_CFG.ghostGlitchBeats)));
+  return w > -0.35 ? 1 : 0.25;
+}
+
+/** 空心菱形（「假」的形状通道：真标记是实心三角/横条/六边形，菱形不在 SHAPE_BY_TRACK 里 → 不会被误读成声部） */
+function ghostDiamond(g, view, cx, cy, s, alpha) {
+  const pts = [
+    { x: cx, y: cy - s },
+    { x: cx + s * 0.7, y: cy },
+    { x: cx, y: cy + s },
+    { x: cx - s * 0.7, y: cy }
+  ];
+  g.lineStyle(Math.max(1, view.designScale * 1.5), COLORS.system.int, alpha);
+  g.strokePoints(pts, true);
+  return pts;
+}
+
+/**
+ * 假节拍标记：空心菱形 + **跨度虚线**（跨度 = lengthBeats 拍 → 变速后仍与真拍位等距）
+ * + 故障闪烁。**只用系统青/白，绝不用声部色**（避免被误读成真事件 → §11 L5 的验收线）。
+ */
+function drawGhost(g, view, x, gh, nowBeat, glitch, x1 = null) {
   const size = timelineMarkerSize(view) * 0.42;
   const y = view.lanes.timelineMidY;
-  const jitter = glitch ? Math.sin((nowBeat + gh.beat) * 6.1) * size * 0.22 : 0;
-  const pts = [
-    { x: x + jitter, y: y - size },
-    { x: x + size * 0.7 + jitter, y },
-    { x: x + jitter, y: y + size },
-    { x: x - size * 0.7 + jitter, y }
-  ];
-  g.lineStyle(Math.max(1, view.designScale * 1.5), COLORS.system.int, glitch ? 0.75 : 0.4);
-  g.strokePoints(pts, true);
+  const flick = glitch ? ghostFlicker(gh, nowBeat) : 1;
+  const jitter = glitch ? Math.sin((nowBeat + gh.beat) * 6.1) * size * 0.22 * flick : 0;
+  const base = glitch ? ALPHA.ghostGlitch : ALPHA.ghost;
+  const alpha = base * flick;
+  const end = x1 == null ? x + size * 1.6 : x1;
+  ghostDiamond(g, view, x + jitter, y, size, alpha);
+  const span = end - x;
+  if (span > size * 1.2) {
+    ghostDiamond(g, view, end - jitter, y, size * 0.72, alpha * 0.85);
+    // 跨度虚线：每 0.25 拍一段 → 段数由 lengthBeats 决定（按拍，不由毫秒）
+    const segs = Math.max(2, Math.round(span / (view.pxPerBeat * 0.25)));
+    const w = Math.max(1, view.designScale * 1.2);
+    g.lineStyle(w, COLORS.system.int, alpha * 0.9);
+    for (let i = 0; i < segs; i++) {
+      const t0 = i / segs;
+      const t1 = (i + 0.55) / segs;
+      g.lineBetween(x + span * t0, y, x + span * t1, y);
+    }
+  }
   if (glitch) {
-    g.lineStyle(Math.max(1, view.designScale), COLORS.white.int, 0.3);
+    g.lineStyle(Math.max(1, view.designScale), COLORS.white.int, ALPHA.ghostScan * flick);
     g.lineBetween(x - size * 1.6, y + size * 0.5, x + size * 1.6, y + size * 0.5);
   }
+  return { x, x1: end, alpha, flick };
+}
+
+/**
+ * 变速视觉预告：过渡区间 [cue.beat, cue.targetBeat] 上排 `tempoCueChevrons` 个右向箭头，
+ * 越接近新 BPM 生效点越宽 → 「这里的格子要挤了」。几何全部走拍域（CR-08：不自行推算拍长）。
+ */
+function drawTempoRamp(g, view, x0, x1, cue, nowBeat) {
+  const r = bandRect(view);
+  const y = r.y + r.h * 0.5;
+  const n = Math.max(2, TIMELINE_CFG.tempoCueChevrons);
+  const span = x1 - x0;
+  const s = Math.max(3, view.lanes.markerH * 0.35);
+  const a = TIMELINE_CFG.tempoCueAlpha * (0.75 + 0.25 * Math.abs(Math.sin((nowBeat - cue.beat) * Math.PI)));
+  g.lineStyle(Math.max(1, view.designScale * 1.4), COLORS.system.int, a);
+  if (Math.abs(span) > 1) g.lineBetween(x0, r.y + r.h * 0.12, x1, r.y + r.h * 0.12);
+  for (let i = 0; i < n; i++) {
+    const t = (i + 0.5) / n;
+    const cx = x0 + span * t;
+    const w = s * (0.6 + 0.9 * t);
+    g.lineBetween(cx - w * 0.5, y - w, cx + w * 0.5, y);
+    g.lineBetween(cx + w * 0.5, y, cx - w * 0.5, y + w);
+  }
+  g.lineStyle(Math.max(1, view.designScale * 2), DERIVED.barLine.int, 0.9);
+  g.lineBetween(x1, r.y + r.h * 0.08, x1, r.y + r.h * 0.92);
+  return { x0, x1, chevrons: n, beat: cue.beat, targetBeat: cue.targetBeat };
 }
 
 /** 形状通道表（导出给断言，值来自 theme.SHAPE_BY_TRACK，不另立一份） */

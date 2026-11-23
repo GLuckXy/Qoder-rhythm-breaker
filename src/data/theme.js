@@ -232,7 +232,14 @@ export const TIMELINE_CFG = {
   legendBeatOffset: 0.75,
   /** W-12 假节拍上限（L-06：≤8 处标记、其中仅 2 处演出型故障闪烁） */
   ghostMax: 8,
-  ghostGlitchMax: 2
+  ghostGlitchMax: 2,
+  /** W-12（R3 追加）：假标记的跨度与故障闪烁时长，全部按**拍**表达（CR-12：渲染时长以 lengthBeats 为真相） */
+  ghostLenBeats: 1,
+  ghostLenMaxBeats: 2,
+  ghostGlitchBeats: 0.5,
+  /** W-12：变速视觉预告的箭头排布（拍）与强度；数据源 = clock.getTempoCues()，本层不自推算 */
+  tempoCueChevrons: 3,
+  tempoCueAlpha: 0.6
 };
 
 /** 尺寸（1080p 基准，PRD §7.5） */
@@ -365,6 +372,93 @@ export const MOTION = {
 export function beatsToSec(beats, beatSec) {
   return beats * beatSec;
 }
+
+/**
+ * 5b · W-07/W-08 拆解演出的几何常量（R3 新增，纯追加，不改 MOTION 的任何既有值）。
+ * **时长的真相全在 MOTION 与 QUALITY_PRESETS（拍系数）**；这里只有「形状/强度」系数，
+ * 且强度类一律 ≤1 的比例，由 EffectSystem 乘到 preset 给出的上限上，避免第二套真相。
+ */
+export const FX_TIMING = {
+  /** 碎片寿命（拍）：碎裂几何在此拍数内飞完并淡出（与降饱和/大字同 startBeat，各自长度不同） */
+  shatterBeats: 0.9,
+  /** 整屏裂纹淡出跨度（拍） */
+  crackBeats: 0.55,
+  /** 碎片飞行跨度 = shardSpreadBeats × pxPerBeat（按拍 → 变速关自洽） */
+  shardSpreadBeats: 0.75,
+  /** 碎片重力（单位：屏高/秒²）；仍是闭式 0.5·g·t²，不做积分 */
+  shardFallG: 1.6,
+  /** 碎片相对原字形半径的比例 */
+  shardSizeRatio: 0.42,
+  /** 无在场障碍时的兜底碎裂点数（可读窗内均分） */
+  defaultTargets: 4,
+  /** 单次拆解可捕获的在场目标上限（越界的碎片由 particlesLiveMax 二次裁剪） */
+  maxTargets: 12,
+  /** 碎裂记录保留跨度（拍）：超过即从事件缓冲回收（不按毫秒计时） */
+  gcBeats: 4,
+  crackCount: 7,
+  crackAlpha: 0.55,
+  crackWidthRatio: 1.2,
+  crackBendRatio: 0.42,
+  desaturateAlpha: 0.62,
+  /** 大字：入场占驻留跨度的比例 / 出场比例 / 落点（世界带纵向比例 + 拍位偏移） */
+  bigTextInRatio: 0.18,
+  bigTextOutRatio: 0.34,
+  bigTextYRatio: 0.3,
+  bigTextBeatOffset: 0.9,
+  wordDisassemble: '已拆解',
+  /** W-08 复活扫回：跨度（拍）与强度 */
+  reviveBeats: 1.0,
+  reviveAlpha: 0.5,
+  reviveFlashAlpha: 0.75,
+  /** C3 批复：复活后 hp 显示回 1（与 CORE 的 REVIVE_HP 同值；显示侧登记，不回读 CORE 文件） */
+  reviveHpDisplay: 1,
+  /** hp 点血闪 */
+  hpTapBeats: 0.3,
+  hpTapAlpha: 0.4,
+  /** PERFECT 粒子（PRD §15.2 的 22 粒由 standard 档给，这里只限非 preset 上限的兜底值） */
+  burstBeats: 0.45,
+  burstPerf: 22,
+  burstSpreadBeats: 0.5,
+  burstSizeRatio: 3,
+  /** 判定线金闪强度 */
+  flashAlpha: 0.85,
+  flashNonCoreRatio: 0.55,
+  /** MISS vignette */
+  vignetteBeats: 0.6,
+  vignetteBands: 6,
+  vignetteDepthRatio: 0.12,
+  /** 震屏频率（每拍往复次数）与硬顶（≤ QUALITY_CAPS.shakeMaxPx，越界由 preset 再削） */
+  shakeCycles: 2.5,
+  shakeMaxCapPx: 20,
+  /** 拖尾残影条数 / 微尘 */
+  trailGhosts: 4,
+  trailAlpha: 0.32,
+  dustBeats: 0.35,
+  dustCount: 6,
+  dustSpreadBeats: 0.35,
+  dustAlpha: 0.5,
+  /** bloom 强度换算比例（只在 preset.bloomIntensity>0 的档生效） */
+  bloomAlphaScale: 0.5,
+  /** 光敏安全档（preset.flashReductionSafe=true）对叠印强度的削减比例（PERF-05 ③） */
+  safeScale: 0.6,
+  /** 事件缓冲上限（条） */
+  maxEvents: 24
+};
+
+/**
+ * 5c · W-11 核心节点的独立视觉编码（L-08：灰度化后仍要「一眼指出哪个是核心」）。
+ * 核心 = 白描边 + 中心点（既有）+ **四角括号**（本轮新增的**空间通道**：括号落在字形包围盒之外，
+ * 即使整屏去色、去亮度差，只数「字形外围有没有 4 段白线」也能分辨）。非核心**不给任何 hp 暗示**
+ * （hp 属 HUD/图例，障碍本体不画格数）。
+ */
+export const CORE_MARK = {
+  bracketGapRatio: 1.32, // 括号所在半径 = 字形半径 × 本值（>1 ⇒ 必在包围盒外）
+  bracketLenRatio: 0.46, // 每段括号边长 = 字形半径 × 本值
+  widthRatio: 0.06, // 线宽 = 字形半径 × 本值
+  count: 4, // 4 段（顶点数 = 可数的第三通道）
+  alpha: 0.95,
+  minLumaDelta: 40 // 灰度可辨门限（与 GRAY_CONTRAST_MIN 同值，断言交叉引用）
+};
 
 // ---------------------------------------------------------------------------
 // 6 · 质量预设（C8 的「粒子与 bloom 上限」+ T16 审美候选）

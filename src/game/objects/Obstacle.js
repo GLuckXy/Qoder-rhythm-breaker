@@ -19,6 +19,7 @@ import {
   BACKGROUND_CFG,
   COLORS,
   CORE_EDGE,
+  CORE_MARK,
   LEAD_BEATS,
   MARKER_TONE_MODE_DEFAULT,
   MOTION,
@@ -381,13 +382,58 @@ export function drawTrackShape(g, o) {
   return pts;
 }
 
-/** 核心节点标记（OBS-05 的 v0：白描边 + 内点。正式辨识度归 W-11） */
+/**
+ * 核心节点标记（W-11 的 v1）= **三条独立通道**，任一条被削掉都还能分辨：
+ *  ① 明度通道：白描边 + 中心点（255 灰度，非核心节点没有任何 255 级墨迹）；
+ *  ② 空间通道：`coreBracketLines` 的 4 个角括号**必定落在字形包围盒之外**（灰度化后仍是「外围有东西」）；
+ *  ③ 计数通道：段数固定 = CORE_MARK.count × 2，可数（与形状/色相无关）。
+ * 非核心节点走同一函数时直接 return，**不给任何 hp 暗示**（hp 属 HUD 与图例，障碍本体不画格数）。
+ */
 export function drawCoreEdge(g, pts, size, alpha = 1) {
   g.lineStyle(Math.max(1, size * CORE_EDGE.widthRatio), CORE_EDGE.color, CORE_EDGE.alpha * alpha);
   g.strokePoints(pts, true);
   const c = centroid(pts);
   g.fillStyle(COLORS.white.int, alphaOf('coreEdge', ALPHA.coreEdge) * alpha);
   g.fillCircle(c.x, c.y, Math.max(1.5, size * 0.18));
+  const lines = coreBracketLines(pts, size);
+  g.lineStyle(Math.max(1, size * CORE_MARK.widthRatio), CORE_EDGE.color, CORE_MARK.alpha * alpha);
+  for (const ln of lines) g.lineBetween(ln.x1, ln.y1, ln.x2, ln.y2);
+  return lines;
+}
+
+/**
+ * 四角括号的线段表（纯几何，导出给断言：可验证「全部在包围盒外」与「恰好 8 段」）。
+ * 角点 = 包围盒四角沿对角线外推 pad；两条臂沿轴回指 LEN，形成 L 形。
+ */
+export function coreBracketLines(pts, size = 0) {
+  if (!pts || !pts.length) return [];
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const p of pts) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  const half = Math.max(maxX - minX, maxY - minY, size * 2, 1) / 2;
+  const pad = half * (CORE_MARK.bracketGapRatio - 1) + 1;
+  const len = Math.max(2, half * CORE_MARK.bracketLenRatio);
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  const ex = half + pad;
+  const ey = (maxY - minY) / 2 + pad;
+  const out = [];
+  for (const sx of [-1, 1]) {
+    for (const sy of [-1, 1]) {
+      const px = cx + sx * ex;
+      const py = cy + sy * ey;
+      out.push({ x1: px, y1: py, x2: px - sx * len, y2: py });
+      out.push({ x1: px, y1: py, x2: px, y2: py - sy * len });
+    }
+  }
+  return out;
 }
 
 function centroid(pts) {

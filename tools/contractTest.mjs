@@ -953,7 +953,7 @@ async function caseForbidClock() {
 /* case: debug — K-03 DebugPanel 渲染契约（Node 内极简假 DOM，不需要浏览器） */
 /* ------------------------------------------------------------------ */
 
-/** 只实现 DebugPanel 用到的 DOM 子集：createElement / getElementById / body / 事件绑定。 */
+/** 只实现界面板用到的 DOM 子集：createElement / createTextNode / getElementById(#debug-root 与 #ui-root) / body / 事件绑定。 */
 function installFakeDom(search = '') {
   const created = [];
   const listeners = {};
@@ -1001,10 +1001,12 @@ function installFakeDom(search = '') {
     return node;
   }
   const root = makeNode('div');
+  const uiRoot = makeNode('div'); // K-13：DOM 界面的挂载点（L-04），screens case 用它数节点
   const body = makeNode('body');
   globalThis.document = {
-    getElementById: (id) => (id === 'debug-root' ? root : null),
+    getElementById: (id) => (id === 'debug-root' ? root : id === 'ui-root' ? uiRoot : null),
     createElement: (tag) => makeNode(tag),
+    createTextNode: (t) => Object.assign(makeNode('#text'), { textContent: String(t) }),
     body
   };
   globalThis.window = {
@@ -1020,6 +1022,7 @@ function installFakeDom(search = '') {
   };
   return {
     root,
+    uiRoot,
     body,
     created,
     text: () => created.filter((n) => n.tagName === 'PRE').map((n) => n.textContent).join('\n'),
@@ -1529,8 +1532,14 @@ async function caseActiontype() {
   eq('actiontype: judgable:false 的 bed 不入队（本夹具无 bed）', `${judge.pendingCount()}/${inst.length}`, '6/6');
 
   // JDG-07：错动作按 GOOD 通过，不涨不扣 hp
-  clock.advanceTo(clock.timeAtBeat(8) + 0.01);
-  const wrong = judge.onInput('dash', clock.timeAtBeat(8) + 0.01); // kick 期望 jump
+  // R3 口径修正：这段原来打在拍 8 上，而拍 8 正是下面 JDG-08 的夹具拍。按 PRD L184「同一拍最多 1 次
+  // 输入被消费」，JDG-07 这次输入会把拍 8 的输入名额用光，JDG-08 的「第一次输入消费一个障碍」在同一拍
+  // 上永远不可能成立。挪到拍 12（synth→barrage，期望 dash，用 jump 就是错动作）后断言内容一条没减。
+  // R3 口径修正（二）：这里**不推进时钟**。C2 的 atSec 是判定唯一时间源（真实游戏里 = keydown 时取的
+  // BeatClock.now()），测试直接给权威时刻即可；一旦 advanceTo 到拍 12，拍 8 那两个障碍的超时定时器
+  // （due = 4.11）会先派发，JDG-08 的夹具拍就没有可消费的障碍了——原来把两段都写在拍 8 上正是被这个
+  // 连锁反应卡住的表象。
+  const wrong = judge.onInput('jump', clock.timeAtBeat(12) + 0.01); // barrage 期望 dash
   eq('actiontype: 错动作 → GOOD', wrong.grade, 'GOOD');
   eq('actiontype: 错动作 → actionMatch false', wrong.actionMatch, false);
   eq('actiontype: 错动作仍算命中（rule window / penalizes true）', `${wrong.rule}/${wrong.penalizes}`, 'window/true');
@@ -1540,11 +1549,18 @@ async function caseActiontype() {
   eq('actiontype: 错动作保留连击', ds.combo, 1);
 
   // JDG-08：同拍的两个障碍，一次输入只消费一个
+  // R3 口径修正：输入时刻原来写的是 t8+0.4 / t8+0.42 —— 400ms 是 GOOD 窗口（110ms）的 3.6 倍，
+  // 按 C2 的窗口匹配它**必然**落成 emptyBeat，「第一次输入消费了某个障碍」与「待判定数 -1」在冻结的
+  // 窗口表面前无解（不是实现少写了一条分支，是夹具时刻越界）。改成窗口内 60ms / 64ms 之后，
+  // 三次断言各自的行为主张原样保留：恰好消费 1 个 / 第二次同拍输入不消费 / 待判定 -1。
   const beat8 = inst.filter((o) => o.beat === 8);
   eq('actiontype: 夹具的拍 8 有 2 个障碍', beat8.length, 2);
   const t8 = clock.timeAtBeat(8);
-  const a = judge.onInput('jump', t8 + 0.4);
-  const b = judge.onInput('jump', t8 + 0.42);
+  // 取「GOOD 环内、PERFECT 外」的时刻（窗口表的几何中点），本块要验的是**消费名额**而不是扣分，
+  // 写在 PERFECT 里会顺手扣 hp，后面的 emptyBeat/复活断言基线就被自己改掉了。
+  const inGoodRing = (judge.windows().perfectMs + judge.windows().goodMs) / 2000;
+  const a = judge.onInput('jump', t8 + inGoodRing);
+  const b = judge.onInput('jump', t8 + inGoodRing + 0.004);
   ok('actiontype: 第一次输入消费了某个障碍', !!a.obstacleId, JSON.stringify(a));
   eq('actiontype: 同拍第二次输入不再消费（JDG-08）', b.obstacleId, null);
   eq('actiontype: 同拍第二次输入按 emptyBeat 无惩罚呈现', `${b.rule}/${b.penalizes}`, 'emptyBeat/false');
@@ -1566,9 +1582,13 @@ async function caseActiontype() {
   eq('actiontype: 超时 MISS 走同一入口并触发复活（hp 最小者）', feed.filter((j) => j.obstacleId === target.id)[0].trigger, 'timeout');
 
   // 空拍形状
+  // R3 口径修正：期望值原来是绝对串 "4/0"，但本 case 在前面**故意**制造了超时 MISS（拍 8 漏掉的那
+  // 个 + CR-08#4 的 target），miss 早已非 0——按「miss 必须为 0」写死等于要求实现不吃超时判定，
+  // 与 JDG-05 冲突。这里要验的是「空拍**不增加** miss 计数、不扣 hp」，所以基线取空拍输入之前的值。
+  const missBeforeEmpty = ds.counts().miss;
   const empty = judge.onInput('jump', clock.timeAtBeat(50));
   eq('actiontype: 空拍形状', `${empty.grade}/${empty.rule}/${empty.trigger}/${empty.penalizes}/${empty.obstacleId}`, 'MISS/emptyBeat/input/false/null');
-  eq('actiontype: 空拍不改 hp 也不进 MISS 统计', `${ds.hp('kick')}/${ds.counts().miss}`, '4/0');
+  eq('actiontype: 空拍不改 hp 也不进 MISS 统计', `${ds.hp('kick')}/${ds.counts().miss}`, `4/${missBeforeEmpty}`);
   note('JDG-07（错动作按 GOOD、不涨不扣 hp）与 JDG-08（同拍单输入只消费一个）+ CR-08 #4（提前触发不双判）已固化');
 }
 
@@ -1632,10 +1652,6 @@ async function caseFreeorder() {
   eq('freeorder: L6 完美局 → 全拆 + Perfect 100%', `${rig.ds.disassembled()}/${rig.ds.perfectRate()}`, 'true/1');
   eq('freeorder: L6 完美局评级 S', rig.ds.rank(), 'S');
   eq('freeorder: L6 完美局无惩罚 MISS', rig.ds.counts().miss, 0);
-}
-
-function ds_free(ds) {
-  return ds.freeOrder();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1710,6 +1726,10 @@ async function caseIntegration() {
     const instanceBase = rig.instances.length;
     let everyRestartIdentical = true;
     for (let i = 0; i < 20; i += 1) {
+      // 重开的正确顺序（K-05 / T6）：时钟回到第 0 拍锚点 → 判据与 hp 复位 → 再入队 → 再挂订阅。
+      // 时钟放最后一步复位等于「用上一局的终点跑下一局」，20 次里前一次永远 0 判定。
+      rig.clock.stop();
+      rig.clock.start(0);
       rig.judge.reset();
       rig.ds.reset();
       rig.judge.registerObstacles(rig.instances);
@@ -1718,8 +1738,6 @@ async function caseIntegration() {
       // 每一局重开都必须得到完全一样的判定数与分母（T6：重开不改变耐久统计口径）
       if (rig.ds.counts().perfect !== 55 || rig.ds.total() !== 55 || rig.feed.length !== (i + 2) * 55) everyRestartIdentical = false;
       rig.ds.detach();
-      rig.clock.stop();
-      rig.clock.start(0);
     }
     eq('integration: 20 次重开每一局判定数与分母都相同（无累积漂移）', everyRestartIdentical, true);
     eq('integration: 20 次重开后 clock 队列回基线', rig.clock.queueSize(), queueBase);
@@ -1801,6 +1819,261 @@ async function caseIntegration() {
 }
 
 /* ------------------------------------------------------------------ */
+/* case: screens — K-13 五界面 + K-15 流程串接（假 DOM，无需浏览器）        */
+/* ------------------------------------------------------------------ */
+
+/** 假 DOM 没有 querySelector：按 data-role 走子树找节点。 */
+function findByRole(el, role) {
+  if (!el) return null;
+  if (typeof el.getAttribute === 'function' && el.getAttribute('data-role') === role) return el;
+  for (const c of el.childNodes || []) {
+    const hit = findByRole(c, role);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** 收集子树里的所有文本（元素 textContent + 文本节点）。 */
+function textOf(el, out = []) {
+  if (!el) return out;
+  if (typeof el.textContent === 'string' && el.textContent) out.push(el.textContent);
+  for (const c of el.childNodes || []) textOf(c, out);
+  return out;
+}
+
+/** 仍挂在挂载点下面的节点总数（摘掉的孤儿节点不计 —— 就是 K-05 的泄漏口径）。 */
+function attachedCount(root) {
+  let n = 0;
+  const walk = (x) => {
+    n += 1;
+    for (const c of x.childNodes || []) walk(c);
+  };
+  for (const c of root.childNodes || []) walk(c);
+  return n;
+}
+
+/** 假 DOM 上手工派发非 click 事件（input / change）。 */
+function fire(el, type, ev) {
+  for (const fn of ((el && el.handlers && el.handlers[type]) || []).slice()) fn(ev);
+}
+
+/** 把界面里由点击派生的微任务（showTitle/showSelect 走 Promise）跑完。 */
+async function flushMicrotasks() {
+  for (let i = 0; i < 8; i += 1) await Promise.resolve();
+}
+
+async function caseScreens() {
+  const MC = await load('src/mocks/MockClock.js', 'screens');
+  const JS = await load('src/game/systems/JudgeSystem.js', 'screens');
+  const DS = await load('src/game/systems/DisassembleSystem.js', 'screens');
+  const PG = await load('src/game/systems/PatternGenerator.js', 'screens');
+  const UI = await load('src/ui/screens/UiLayer.js', 'screens');
+  const SAVE = await load('src/data/save.js', 'screens');
+  if (!MC || !JS || !DS || !PG || !UI || !SAVE) return;
+
+  const levels = [1, 2, 3]
+    .map(readLevel)
+    .filter(Boolean)
+    .map((c) => ({ id: c.id, title: c.title, bpm: c.bpm, lengthBeats: c.lengthBeats }));
+  const l1 = readLevel(1);
+  if (!l1 || levels.length < 2) {
+    skipCase('screens', 'src/data/levels/level*.json 不足两关（SOUND 名下内容），无法验「结算 → 下一关」串接');
+    return;
+  }
+  const rig = buildRig(PG, MC, JS, DS, l1);
+  const dom = installFakeDom();
+
+  const route = [];
+  const volCalls = [];
+  const spy = { strict: [], latency: [] };
+  const engine = {
+    ensureRunning: () => {
+      route.push('unlock');
+      return Promise.resolve(true);
+    },
+    setVolumes: (v) => volCalls.push({ ...v }),
+    getVolumes: () => ({ master: 0.8, music: 0.6, sfx: 0.7 })
+  };
+  // 只透传 + 记账：界面走的是真 judge 的方法，spy 用来证明「唯一写入口」没有被绕过
+  const judge = {
+    setStrictWindow: (on) => {
+      spy.strict.push(!!on);
+      return rig.judge.setStrictWindow(on);
+    },
+    setLatency: (ms) => {
+      spy.latency.push(ms);
+      return rig.judge.setLatency(ms);
+    },
+    getLatency: () => rig.judge.getLatency(),
+    windows: () => rig.judge.windows()
+  };
+  // 假 runtime：只做 LevelRuntime 真暴露给界面那几件事，冻结/解冻仍然只走 clock.pause()/resume()（R11）
+  const rt = {
+    cfg: { id: l1.id, title: l1.title },
+    paused: false,
+    restarts: 0,
+    togglePause() {
+      this.paused = !this.paused;
+      if (this.paused) rig.clock.pause();
+      else rig.clock.resume();
+      return this.paused;
+    },
+    restart() {
+      this.restarts += 1;
+      rig.clock.stop();
+      rig.clock.start(0);
+      this.paused = false;
+    },
+    quit() {
+      route.push('quit');
+    },
+    stateLine: () => rig.ds.state()
+  };
+  let host = null; // 标题/选关态没有 runtime，暂停/结算态有
+  const ui = UI.createUiLayer({
+    clock: rig.clock,
+    judge,
+    ds: rig.ds,
+    engine,
+    levels: () => levels,
+    gotoLevel: (id) => route.push(`goto:${id}`),
+    toTitle: (d) => route.push(`title:${(d && d.notice) || ''}`),
+    runtime: () => host
+  });
+
+  const COLOR_STYLE_RE = /#[0-9a-fA-F]{3,8}\b|\brgba?\s*\(|\bhsla?\s*\(/;
+  try {
+    /* ① 标题 */
+    eq('screens: 找到挂载点 #ui-root（L-04）', ui.mounted, true);
+    await ui.showTitle({ notice: '假 DOM 回归' });
+    eq('screens: 标题面板 current()', ui.current(), 'title');
+    eq('screens: 面板带 data-screen 标记', ui.element().getAttribute('data-screen'), 'title');
+    ok('screens: 标题三键齐（开始 / 选关 / 设置）', ['title-start', 'title-select', 'title-settings'].every((r) => Boolean(findByRole(ui.element(), r))));
+    findByRole(ui.element(), 'title-start').click();
+    await flushMicrotasks();
+    eq('screens: 开始 = 先解锁音频再进关（顺序不能反）', route.join('|').startsWith('unlock|goto:'), true);
+    route.length = 0;
+
+    /* ② 选关 */
+    findByRole(ui.element(), 'title-select').click();
+    await flushMicrotasks();
+    eq('screens: 标题 → 选关（同一时刻只许一层面板）', `${ui.current()}/${dom.uiRoot.childNodes.length}`, 'select/1');
+    eq('screens: 选关卡片数 = 关卡清单长度', levels.filter((lv) => Boolean(findByRole(ui.element(), `pick-${lv.id}`))).length, levels.length);
+    findByRole(ui.element(), `pick-${levels[1].id}`).click();
+    eq('screens: 选卡 → gotoLevel(该关 id)', route[route.length - 1], `goto:${levels[1].id}`);
+    route.length = 0;
+    await ui.showSelect();
+    findByRole(ui.element(), 'select-back').click();
+    await flushMicrotasks();
+    eq('screens: 选关 → 返回标题', ui.current(), 'title');
+
+    /* ③ 暂停（★ 时钟只有 BeatClock 一个权威） */
+    rig.clock.advanceBy(1); // 让拍序先走起来，才好证明暂停/恢复不重置拍序
+    host = rt;
+    rt.togglePause();
+    await ui.showPause();
+    eq('screens: 暂停面板挂上', `${ui.current()}/${rig.clock.isPaused()}`, 'pause/true');
+    ok('screens: 面板如实显示「时钟已冻结」', textOf(ui.element()).some((t) => t.includes('isPaused=true')));
+    findByRole(ui.element(), 'pause-settings').click();
+    await flushMicrotasks();
+    eq('screens: 暂停 → 设置', ui.current(), 'settings');
+    findByRole(ui.element(), 'settings-back').click();
+    await flushMicrotasks();
+    eq('screens: 设置 → 仍回暂停面板（不掉空、不解除暂停）', `${ui.current()}/${rt.paused}`, 'pause/true');
+    findByRole(ui.element(), 'pause-restart').click();
+    await flushMicrotasks();
+    eq('screens: 面板里重开 → 重开计数 +1 且时钟交还（不许停在暂停态）', `${rt.restarts}/${rig.clock.isPaused()}/${ui.current()}`, '1/false/null');
+    await ui.showPause();
+    findByRole(ui.element(), 'pause-quit').click();
+    eq('screens: 面板里退出 → 交回宿主 quit()', route[route.length - 1], 'quit');
+    route.length = 0;
+    rt.togglePause();
+    await ui.showPause();
+    const beatBeforeResume = rig.clock.currentBeat(); // 重开之后重新取基准：这里验的是「暂停→恢复」，不是「重开归零」
+    findByRole(ui.element(), 'pause-resume').click();
+    await flushMicrotasks();
+    eq('screens: 「继续」走 clock.resume()（界面不自建计时）', `${rt.paused}/${rig.clock.isPaused()}/${ui.current()}`, 'false/false/null');
+    eq('screens: 恢复后拍序不重置也不跳跃', rig.clock.currentBeat(), beatBeforeResume);
+
+    /* ④ 设置（音量三通道 / 严格窗口 / K-14 降级版延迟微调） */
+    await ui.showSettings('title');
+    eq('screens: 设置面板挂上', ui.current(), 'settings');
+    const master = findByRole(ui.element(), 'vol-master');
+    master.value = '0.35';
+    fire(master, 'input', { target: master });
+    eq('screens: 音量滑条只调 engine.setVolumes（不碰 GainNode）', `${volCalls.length}/${volCalls[volCalls.length - 1].master}`, '1/0.35');
+    const box = findByRole(ui.element(), 'strict-window');
+    box.checked = true;
+    fire(box, 'change', { target: box });
+    eq('screens: 严格窗口透传 judge.setStrictWindow', spy.strict.join(','), 'true');
+    const lat0 = rig.judge.getLatency();
+    const up = findByRole(ui.element(), 'latency-up');
+    up.click();
+    up.click();
+    up.click();
+    eq('screens: L-06 降级版：延迟按钮每步 1ms', `${rig.judge.getLatency() - lat0}/${spy.latency.length}`, '3/3');
+    findByRole(ui.element(), 'latency-down').click();
+    eq('screens: －1ms 步进对称', rig.judge.getLatency(), lat0 + 2);
+    ui.applyLatency(199);
+    await ui.showSettings('title'); // 重开面板取当前值，验钳位
+    const up2 = findByRole(ui.element(), 'latency-up');
+    up2.click();
+    up2.click();
+    up2.click();
+    eq('screens: 延迟钳位在 CALIBRATION.maxMs（200ms）', rig.judge.getLatency(), 200);
+    const saved = SAVE.getSave();
+    eq('screens: 音量 / 延迟 / 严格窗口都落进存档', `${saved.audio.master}/${saved.audio.music}/${saved.audio.sfx}/${saved.audio.latencyOffset}/${saved.options.strictWindow}`, '0.35/0.6/0.7/200/true');
+
+    /* ⑤ 结算（分母 = 可判定障碍，不含 bed） */
+    playRig(rig, { stomp: true });
+    const stats = rig.ds.stats();
+    const judgable = rig.instances.filter((o) => o.judgable !== false).length;
+    eq('screens: 结算分母 = judgable!==false 的障碍数', `${stats.total}/${judgable}`, `${judgable}/${judgable}`);
+    await ui.showResult(stats, { level: l1 });
+    eq('screens: 结算面板挂上', ui.current(), 'result');
+    eq('screens: 评级取 ds.rank()（界面不自算第二套口径）', findByRole(ui.element(), 'rank').textContent, stats.rank);
+    ok('screens: Perfect 率按 §7.3 口径显示', textOf(ui.element()).some((t) => t.includes(`${(stats.perfectRate * 100).toFixed(1)}%`)));
+    ok('screens: 面板把「背景层不计入」写明白', textOf(ui.element()).some((t) => t.includes('可判定障碍') && t.includes('背景层不计入')));
+    const outBtn = findByRole(ui.element(), stats.disassembled ? 'result-next' : 'result-next-incomplete');
+    ok('screens: 结算有下一步出口（K-15 零断点）', Boolean(outBtn));
+    outBtn.click();
+    await flushMicrotasks();
+    ok('screens: 出口落到「下一关」或「回标题」之一', /^(goto:\d+|title:.*)$/.test(route[route.length - 1] || ''), route[route.length - 1] || '(无)');
+
+    /* CR-13：界面样式里不许出现色值字面量 */
+    const styles = dom.created.filter((n) => n.attrs && typeof n.attrs.style === 'string').map((n) => n.attrs.style);
+    ok('screens: 界面样式 0 个色值字面量（只用 var(--rb-*) / color-mix）', !styles.some((s) => COLOR_STYLE_RE.test(s)), styles.find((s) => COLOR_STYLE_RE.test(s)) || '');
+    ok('screens: 有样式的节点确实吃到了 token', styles.some((s) => s.includes('var(--rb-')) , '');
+
+    /* K-05：20 轮界面不得遗留节点 */
+    let layersBad = 0;
+    for (let i = 0; i < 20; i += 1) {
+      for (const step of [
+        () => ui.showTitle({}),
+        () => ui.showSelect(),
+        () => ui.showPause(),
+        () => ui.showSettings('pause'),
+        () => ui.showResult(rig.ds.stats(), { level: l1 })
+      ]) {
+        await step();
+        if (dom.uiRoot.childNodes.length !== 1) layersBad += 1;
+      }
+      ui.close();
+      if (dom.uiRoot.childNodes.length !== 0) layersBad += 1;
+    }
+    eq('screens: 20 轮 × 5 界面：任意时刻只有一层、关掉就归零', layersBad, 0);
+    eq('screens: 20 轮后 ui-root 无遗留节点', `${attachedCount(dom.uiRoot)}/${dom.uiRoot.childNodes.length}`, '0/0');
+    eq('screens: 界面无未退订的事件订阅', ui.listenerCount(), 0);
+    ui.destroy();
+    eq('screens: destroy 后 current() 归零', ui.current(), null);
+    note(`screens 假 DOM：共创建 ${dom.created.length} 个节点（五界面全走真 build* 函数，无需浏览器）`);
+  } finally {
+    ui.destroy();
+    dom.restore();
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* 入口                                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -1816,7 +2089,8 @@ const CASES = [
   ['silence', caseSilence],
   ['actiontype', caseActiontype],
   ['freeorder', caseFreeorder],
-  ['integration', caseIntegration]
+  ['integration', caseIntegration],
+  ['screens', caseScreens]
 ];
 
 function parseArgs(argv) {

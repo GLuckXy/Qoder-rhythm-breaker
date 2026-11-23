@@ -213,7 +213,14 @@ export class JudgeSystemCore {
         return; // 背景/装饰层：保持原对象不动，交给 WORLD 的 timeline 渲染
       }
       if (typeof o.id !== 'string') o.id = `lv-unknown-${i}`;
-      if (!o.state) o.state = 'pending';
+      // T6「本局重开」：registerObstacles 是重开路径上唯一的入队口，同一批实例再次登记时必须
+      // 回到待判定基线——否则上一局写回的终态（judged / expired）会让重开的整局 0 判定、
+      // 分母与 Perfect 数一起漂走（K-05 的 20 次重开基线断言就是抓它的）。
+      // 'revived' 是生成侧下发的新实例（DIS-05），不是终态，保留。
+      if (o.state !== 'pending' && o.state !== 'revived') {
+        o.state = 'pending';
+        o.grade = null;
+      }
       if (o.grade === undefined) o.grade = null;
       if (!Number.isFinite(o.timeSec)) {
         o.timeSec = this._clock.timeAtBeat(Number(o.beat) || 0);

@@ -11,11 +11,14 @@
 // 帧计数只用「第几帧」这个整数（Phaser 的 POST_UPDATE 信号），要「何时」一律 clock.now()。
 
 import Phaser from 'phaser';
+import { COLORS } from './data/theme.js'; // CR-13：底色走 C8 色板，不写字面量
 import { mountDebugPanel } from './ui/DebugPanel.js';
 import { BeatClock, JudgeSystem, DisassembleSystem, soundEngine } from './game/scenes/appDeps.js';
-import BootScene, { loadLevel, availableLevelIds } from './game/scenes/BootScene.js';
+import BootScene, { loadLevel, availableLevelIds, levelCatalog } from './game/scenes/BootScene.js';
 import TitleScene from './game/scenes/TitleScene.js';
 import LevelScene from './game/scenes/LevelScene.js';
+import { createUiLayer } from './ui/screens/UiLayer.js';
+import { uiRef } from './game/scenes/appDeps.js';
 
 /* ------------------------------------------------------------------ */
 /* 路由（纯函数，Node 里也能跑）                                        */
@@ -76,7 +79,7 @@ if (typeof window !== 'undefined' && window.console) {
 const game = new Phaser.Game({
   type: Phaser.AUTO,
   parent: 'game-root',
-  backgroundColor: '#0a0e1a',
+  backgroundColor: COLORS.base.hex, // CR-13：底色取 C8 色板，不写字面量
   scale: { mode: Phaser.Scale.RESIZE, autoCenter: Phaser.Scale.CENTER_BOTH, width: 1280, height: 720 },
   audio: { noAudio: true }, // C9：AudioContext 只允许 SOUND 持有（engine.init），Phaser 不得再建第二个
   scene: [BootScene, TitleScene, LevelScene]
@@ -92,6 +95,52 @@ function levelScene() {
   const s = game.scene.isActive('Level') ? game.scene.getScene('Level') : null;
   return s && s.runtime ? s : null;
 }
+
+/* ------------------------------------------------------------------ */
+/* K-13 界面层 + K-15 流程串接（DOM 覆盖层，leader 决策 L-04）            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 全流程唯一的「装谱面 → 起 Level」出口：标题、选关、结算的「下一关」、深链 ?level=N 都收敛到这里，
+ * 断点只会出现在这一处（K-15 的零断言检查就是查它）。
+ * @param {number} id
+ * @returns {Promise<boolean>}
+ */
+async function gotoLevel(id) {
+  ui.close();
+  const cfg = await loadLevel(id);
+  if (!cfg) {
+    ui.showTitle({ notice: `level${id}.json 读不到（SOUND 名下内容）` });
+    return false;
+  }
+  if (game.scene.isActive('Title')) game.scene.stop('Title');
+  if (game.scene.isActive('Boot')) game.scene.stop('Boot');
+  game.scene.start('Level', { cfg });
+  return true;
+}
+
+/** 回标题：Q 退出、结算面板的「回标题」都走这里；标题界面由 TitleScene.create 负责弹（单一出口）。 */
+function toTitle(data = {}) {
+  ui.close();
+  if (game.scene.isActive('Level')) game.scene.stop('Level');
+  game.scene.start('Title', data);
+  return true;
+}
+
+const ui = createUiLayer({
+  clock: BeatClock,
+  judge: JudgeSystem,
+  ds: DisassembleSystem,
+  engine: soundEngine,
+  levels: levelCatalog,
+  gotoLevel: (id) => gotoLevel(id),
+  toTitle: (data) => toTitle(data),
+  runtime: () => {
+    const s = levelScene();
+    return s ? s.runtime : null;
+  }
+});
+uiRef.current = ui;
 
 /** 只读快照：world 几何 + sound 状态 + 拆解统计（DebugPanel / 验收用，不改变任何状态）。 */
 function snapshot() {
@@ -220,6 +269,7 @@ async function bootSelftest() {
 
 game.events.once(Phaser.Scenes.Events.POST_UPDATE, () => {
   if (route.selftest) bootSelftest();
+  else if (route.level) gotoLevel(route.level); // K-15：?level=N 深链直达（标题界面会被这一步关掉）
 });
 
 /* ------------------------------------------------------------------ */
@@ -227,13 +277,16 @@ game.events.once(Phaser.Scenes.Events.POST_UPDATE, () => {
 /* ------------------------------------------------------------------ */
 
 export const api = {
-  version: 'R2',
+  version: 'R3',
   game,
   clock: BeatClock,
   judge: JudgeSystem,
   ds: DisassembleSystem,
   engine: soundEngine,
   debugPanel,
+  ui,
+  gotoLevel,
+  toTitle,
   route,
   levelScene,
   snapshot,

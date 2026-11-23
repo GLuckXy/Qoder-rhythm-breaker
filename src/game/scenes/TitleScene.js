@@ -7,6 +7,8 @@
 
 import Phaser from 'phaser';
 import { loadLevel, availableLevelIds } from './BootScene.js';
+import { INK_HEX } from '../../ui/tokens.js'; // CR-13
+import { uiRef } from './appDeps.js'; // K-13：DOM 界面层（为 null 时本场景的画布文字仍是完整入口）
 
 export class TitleScene extends Phaser.Scene {
   constructor() {
@@ -27,10 +29,13 @@ export class TitleScene extends Phaser.Scene {
     this.label = this.add.text(48, 48, lines.join('\n'), {
       fontFamily: 'monospace',
       fontSize: '20px',
-      color: '#e8ecf4',
+      color: INK_HEX,
       lineSpacing: 6
     });
     this._go = null;
+    // K-13：标题界面（DOM 覆盖层）。uiRef 为空（Node 契约测试 / #ui-root 缺失）时上面的画布文字
+    // 就是入口，点击与数字键的行为完全一致 —— 流程不会因为界面层缺席而断掉。
+    if (uiRef.current && typeof uiRef.current.showTitle === 'function') uiRef.current.showTitle({ notice: this.lastNotice });
     this.input.once('pointerdown', () => this.enter(ids[0] ?? 1));
     const DIGITS = ['ONE', 'TWO', 'THREE', 'FOUR', 'FIVE', 'SIX', 'SEVEN', 'EIGHT', 'NINE'];
     if (this.input.keyboard) {

@@ -448,10 +448,25 @@ export class DisassembleSystemCore {
       dot.state = 'relit';
       dot.relitUntil = this._clock.timeAtBeat(dot.beat + 1);
       dot.missed = (dot.missed || 0) + 1;
-      // 重亮一拍后再到期 → 直接 expired（保证「只重亮一拍」，不会无限 MISS）
-      this._unsubs.push(this._clock.schedule(() => this._dotFinal(dot.beat), dot.relitUntil));
+      // 重亮一拍后再到期 → 直接 expired（保证「只重亮一拍」，不会无限 MISS）。
+      // K-11 口径补完：一拍窗口已经在过去（时钟跳帧 / 契约测试一次性 advanceTo / 标签页挂起回来）时，
+      // 不能再挂一个「过去时刻」的定时器——BeatClock 与 MockClock 都只在未来时刻派发，那样光点会永远停在
+      // relit，既不算踩灭也不算到期（寂静段收尾演出漏演）。此时就地到期，语义与到点回调完全一致。
+      if (this._clock.now() >= dot.relitUntil - 0.002) this._expireDot(dot);
+      else this._armDotFinal(dot);
     }
     return { beat, combo: this.combo, invulnSec: FROZEN.invulnSec, revived, relitUntil: dot ? dot.relitUntil : null, state: dot ? dot.state : null };
+  }
+
+  /** 挂「重亮一拍后到期」的回调（退订登记进 _unsubs，K-05 teardown 用）。 */
+  _armDotFinal(dot) {
+    this._unsubs.push(this._clock.schedule(() => this._dotFinal(dot.beat), dot.relitUntil));
+  }
+
+  /** 到期收口：只许从 relit 进来，之后不再参与 MISS / 踩灭（DIS-07「只重亮一拍」的落地态）。 */
+  _expireDot(dot) {
+    if (!dot || dot.state !== 'relit') return;
+    dot.state = 'expired';
   }
 
   _dotFinal(beat) {
@@ -459,10 +474,10 @@ export class DisassembleSystemCore {
     if (!dot || dot.state !== 'relit') return;
     const nowSec = this._clock.now();
     if (nowSec < dot.relitUntil - 0.002) {
-      this._unsubs.push(this._clock.schedule(() => this._dotFinal(beat), dot.relitUntil));
+      this._armDotFinal(dot); // CR-08 #4：提前派发要自检重挂
       return;
     }
-    dot.state = 'expired'; // 只重亮一拍；此后再不参与 MISS 判定
+    this._expireDot(dot);
   }
 
   _dotDeadline(beat) {
@@ -479,10 +494,14 @@ export class DisassembleSystemCore {
   }
 
   _scheduleDots() {
+    const nowSec = this._clock.now();
     for (const d of this.dots) {
       if (d.state !== 'lit') continue;
       const due = d.timeSec + this._goodSec();
-      this._unsubs.push(this._clock.schedule(() => this._dotDeadline(d.beat), due));
+      // 进入 SILENCE 时窗口已经过去的 rare case（暂停恢复 / 时钟跳帧）：就地走一次到期检查，
+      // 不挂到过去时刻（挂上也永不派发，光点会卡在 lit 既不 MISS 也不 expired）。
+      if (due <= nowSec - 0.002) this._dotDeadline(d.beat);
+      else this._unsubs.push(this._clock.schedule(() => this._dotDeadline(d.beat), due));
     }
   }
 

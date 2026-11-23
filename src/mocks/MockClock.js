@@ -53,6 +53,18 @@ export class MockClock extends BeatClockCore {
     return this.advanceTo(this._holder.t + dt);
   }
 
+  /**
+   * 重开语义与 BeatClock 对齐：`start(atSec)` 把第 0 拍钉在 atSec（C1），**手动时间源同步回到 atSec**。
+   * BeatClock 侧的墙钟由 AudioContext 提供、原点换了时间就换；MockClock 的时间源是 holder.t，
+   * 不回零的话第二次起跑一进来就落在关卡终点之后，整局 0 判定（K-05 的 20 次重开基线就是抓它）。
+   * 不带参数时保持 BeatClock 的 `now()+0.1` 缺省，不去动 holder。
+   */
+  start(atSec) {
+    const t = Number(atSec);
+    if (Number.isFinite(t)) this._holder.t = t;
+    return super.start(atSec);
+  }
+
   /** 按 stepSec 步长推进 n 步（模拟逐帧/逐轮询）。 */
   advanceSteps(n, stepSec = CLOCK_POLL_MS / 1000) {
     for (let i = 0; i < n; i += 1) this.advanceBy(stepSec);

@@ -17,4 +17,11 @@ DisassembleSystem.events = sharedEvents;
 /** SOUND 名下（CR-11 批复进 C9）：全工程唯一 AudioContext 持有者，import 时零副作用。 */
 export const soundEngine = new SoundEngine();
 
+/**
+ * K-13 界面层（DOM 覆盖层）的注册位：`main.js` 建好 UiLayer 后写进 `uiRef.current`，场景只读不建。
+ * 走这个口子而不是 import main.js，理由与上面一样——避免 main ↔ scenes 的循环依赖。
+ * 为 null 时（Node 契约测试 / 无 #ui-root 的环境）场景退回「画布文字」形态，流程不受影响。
+ */
+export const uiRef = { current: null };
+
 export { BeatClock, JudgeSystem, DisassembleSystem };

@@ -9,6 +9,7 @@
 import Phaser from 'phaser';
 import { JudgeSystem } from '../systems/JudgeSystem.js';
 import { getSave } from '../../data/save.js';
+import { INK_HEX } from '../../ui/tokens.js'; // CR-13：文字颜色走 token，不写字面量
 
 /** 懒加载器表：`level1.json … level6.json`（构建时按实际存在的文件生成，缺的不进产物）。 */
 const LOADERS = import.meta.glob('../../data/levels/level*.json');
@@ -40,6 +41,20 @@ export async function loadLevel(id) {
   }
 }
 
+/**
+ * 选关 / 结算「下一关」要的清单（只带界面需要的元数据，不带 sections）。
+ * 缺文件自然不出现在清单里，六关全缺时返回空数组 → 选关面板显示「尚无谱面」。
+ * @returns {Promise<Array<{id:number,title:string,bpm:number,lengthBeats:number}>>}
+ */
+export async function levelCatalog() {
+  const out = [];
+  for (const id of availableLevelIds()) {
+    const cfg = await loadLevel(id);
+    if (cfg) out.push({ id, title: String(cfg.title || ''), bpm: Number(cfg.bpm), lengthBeats: Number(cfg.lengthBeats) });
+  }
+  return out;
+}
+
 export class BootScene extends Phaser.Scene {
   constructor() {
     super('Boot');
@@ -54,7 +69,7 @@ export class BootScene extends Phaser.Scene {
     this.add.text(40, 40, `Rhythm Breaker · Boot\n谱面就位：${ids.length ? `L${ids.join(' L')}` : '（无，SOUND 尚未交付）'}\n校准 ${save.audio.latencyOffset}ms · 严格窗口 ${save.options.strictWindow ? 'ON' : 'OFF'}`, {
       fontFamily: 'monospace',
       fontSize: '18px',
-      color: '#e8ecf4'
+      color: INK_HEX
     });
     this.scene.start('Title');
   }

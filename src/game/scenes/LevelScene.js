@@ -7,6 +7,9 @@
 import Phaser from 'phaser';
 import WorldLayer from '../render/WorldLayer.js';
 import LevelRuntime from './LevelRuntime.js';
+import { COLORS } from '../../data/theme.js'; // CR-13：画布文字取色走 C8 色板
+import { INK_HEX } from '../../ui/tokens.js';
+import { uiRef } from './appDeps.js';
 import { BeatClock, JudgeSystem, DisassembleSystem, sharedEvents, soundEngine } from './appDeps.js';
 
 const VOICE_LABEL = { kick: '鼓', bass: '贝斯', synth: '合成' };
@@ -19,17 +22,19 @@ export class LevelScene extends Phaser.Scene {
   create(data = {}) {
     const cfg = data.cfg;
     if (!cfg || !Number.isFinite(Number(cfg.bpm))) {
-      this.add.text(48, 48, '缺少关卡数据（请从标题进入）', { fontFamily: 'monospace', fontSize: '20px', color: '#ff4757' });
+      this.add.text(48, 48, '缺少关卡数据（请从标题进入）', { fontFamily: 'monospace', fontSize: '20px', color: COLORS.kick.hex });
       return;
     }
     this.cfg = cfg;
-    this.hud = this.add.text(48, 24, '', { fontFamily: 'monospace', fontSize: '20px', color: '#00f0ff' });
-    this.logLine = this.add.text(48, this.scale.height - 44, '', { fontFamily: 'monospace', fontSize: '20px', color: '#e8ecf4' });
+    this.hud = this.add.text(48, 24, '', { fontFamily: 'monospace', fontSize: '20px', color: COLORS.system.hex });
+    this.logLine = this.add.text(48, this.scale.height - 44, '', { fontFamily: 'monospace', fontSize: '20px', color: INK_HEX });
     this.result = this.add.text(this.scale.width * 0.5 - 180, this.scale.height * 0.32, '', {
       fontFamily: 'monospace',
       fontSize: '26px',
-      color: '#ffd166'
+      color: COLORS.bass.hex
     });
+    this.ui = uiRef.current; // K-13：DOM 界面层（没有就退回画布文字）
+    if (this.ui && typeof this.ui.onLevelStart === 'function') this.ui.onLevelStart(); // K-15 零断点：进关不许带着上一次的面板
 
     this.runtime = new LevelRuntime({
       scene: this,
@@ -42,7 +47,8 @@ export class LevelScene extends Phaser.Scene {
       cfg,
       onEnd: (stats) => this.showResult(stats),
       onQuit: () => this.backToTitle({ notice: `L${cfg.id} 已退出` }),
-      onLog: (text) => this.setLog(text)
+      onLog: (text) => this.setLog(text),
+      onPauseChange: (paused) => this.syncPauseScreen(paused)
     });
     this.runtime.create();
     this.setLog(`L${cfg.id} ${cfg.title || ''} · ${cfg.bpm}BPM`);
@@ -79,6 +85,12 @@ export class LevelScene extends Phaser.Scene {
 
   showResult(stats) {
     this.setLog('RESULT');
+    if (this.ui && this.ui.mounted) {
+      // K-13 界面⑤：结算面板交给 DOM 层，画布文字让位（同一份数字不许叠两层）。
+      this.result.setText('');
+      this.ui.showResult(stats, { level: this.cfg });
+      return;
+    }
     this.result.setText(
       [
         `L${this.cfg.id} 结算 · 评级 ${stats.rank}`,
@@ -96,8 +108,20 @@ export class LevelScene extends Phaser.Scene {
     this.scene.start('Title', data);
   }
 
+  /**
+   * K-13 界面③：暂停面板。
+   * 时序的唯一权威仍是 BeatClock —— runtime.togglePause() 内部只调 clock.pause()/clock.resume()（R11 契约），
+   * 本方法只负责「面板跟不跟着走」，绝不自己停表、也不自己算节拍。
+   */
+  syncPauseScreen(paused) {
+    if (!this.ui || !this.ui.mounted) return;
+    if (paused) this.ui.showPause();
+    else this.ui.close();
+  }
+
   /** ★ 统一 teardown：interval / 音源指针 / 监听 / Phaser 事件全释放。 */
   teardown(opt = {}) {
+    if (this.ui && typeof this.ui.close === 'function') this.ui.close(); // K-05：界面节点与场景同生同灭，20 次重开不遗留
     if (!this.runtime) return 0;
     const left = this.runtime.listenerCount();
     this.runtime.shutdown(opt);
