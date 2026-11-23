@@ -324,6 +324,9 @@ const final = await ev('(()=>{const c=window.__CORE__;const r=document.getElemen
 console.log('· 自动打点汇总 ' + e2e);
 console.log(`· 终态 state=${final.state} ui节点=${final.uiChildren} UI文案「${final.ui}」`);
 console.log(`· 结算数据 stats=${final.stats}`);
+// DEF-05 接线核对：LevelRuntime._writeSave 是否真把 encounterRate 落进 localStorage（Node 侧 save 用例直接调 save.js，测不到这条接线）
+const savedLevel = await ev('(()=>{try{const raw=localStorage.getItem("rhythm-breaker/save");if(!raw)return "NO_SAVE";const lv=JSON.parse(raw).levels||{};return JSON.stringify(lv)}catch(e){return "ERR:"+e.name}})()');
+console.log(`· 存档 levels=${savedLevel}`);
 await shot('04-final.png');
 
 // ---------------------------------------------------------------- teardown 压力（DoD：重开 20 次无残留）

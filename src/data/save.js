@@ -5,6 +5,8 @@
 //   SAV-01 带 version 的 schema；
 //   SAV-02 节流写入（≥500ms），禁止每帧写；
 //   SAV-03 字段缺失 / JSON 损坏 / 隐私模式禁用 → 静默降级为内存默认档，**不抛错**、只提示一次。
+// v1 内部的加性字段（T5）：levels[id].encounterRate = DEF-05 的「评级口径」Perfect 率（遭遇口径），
+//   与 §7.3 的 perfectRate（谱面口径）并存；version 仍是 1，因为它只加不改语义，老档补默认值即可读。
 // 可在 Node 里自验：所有读写都接受注入的 storage 桩（见 tools/contractTest.mjs --case save）。
 
 export const SAVE_KEY = 'rhythm-breaker/save';
@@ -14,7 +16,10 @@ export const WRITE_THROTTLE_MS = 500;
 export const RANKS = Object.freeze(['S', 'A', 'B', 'C']);
 
 export function defaultLevelEntry() {
-  return { cleared: false, rank: null, perfectRate: 0, maxCombo: 0, miss: 0 };
+  // encounterRate（DEF-05 / SAV-01 加性字段）：评级实际用的「遭遇口径」Perfect 率。
+  // perfectRate 保持 §7.3 的谱面口径 P/N 一字不动（选关页的横向比较与旧档都还靠它）；
+  // 缺字段的老档经 mergeLevelEntry 补 0，读取不抛错（SAV-03）。
+  return { cleared: false, rank: null, perfectRate: 0, maxCombo: 0, miss: 0, encounterRate: 0 };
 }
 
 /** 默认档（每次调用返回新对象，避免共享引用被改写）。 */
@@ -49,7 +54,8 @@ function mergeLevelEntry(raw) {
     rank: RANKS.includes(raw.rank) ? raw.rank : null,
     perfectRate: numOf(raw.perfectRate, d.perfectRate, 0, 1),
     maxCombo: Math.round(numOf(raw.maxCombo, d.maxCombo, 0, 1e6)),
-    miss: Math.round(numOf(raw.miss, d.miss, 0, 1e6))
+    miss: Math.round(numOf(raw.miss, d.miss, 0, 1e6)),
+    encounterRate: numOf(raw.encounterRate, d.encounterRate, 0, 1)
   };
 }
 
@@ -110,7 +116,8 @@ export function mergeSave(raw) {
           rank: bestRank(entry.rank, prev.rank),
           perfectRate: Math.max(entry.perfectRate, prev.perfectRate),
           maxCombo: Math.max(entry.maxCombo, prev.maxCombo),
-          miss: entry.miss
+          miss: entry.miss,
+          encounterRate: Math.max(entry.encounterRate, prev.encounterRate)
         };
       }
     }

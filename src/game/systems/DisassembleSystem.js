@@ -12,9 +12,17 @@
 //      HUD / ReplayAssembler 一律用 `penalizes` 字段过滤，不许再各写一份「算不算 MISS」。
 //   2) 分流判据唯一化：只看 `judgable` 布尔，**禁止**用 `track==='bed'` / `type==='bed'` 猜；
 //      `tracks.bed` 一律忽略（读 `disassemble:false`，不猜 `hp===0`）。
-//   3) 分母 = **本局实际出现过的可判定事件数** = 初始谱面 + 复活补发的新实例（R6 修订，旧 §7.3「固定分母」
-//      在复活局里会把 perfectRate 顶到 1.9）；重开（reset）回初始谱面基线，不跨局累加。
-//      初始谱面单独存为 `_denominator`（对外 `baseTotal()`），内容校验仍用它。
+//   3) 分母 = **本关 noteEvents 生成的「可判定障碍」总数**（PRD §7.3 的固定分母，与复活/重开无关）＝
+//      `setInstances()` 里 `judgable !== false` 的实例数，存为 `_denominator`。复活**不改分母**：
+//      DIS-05 的「恢复该类障碍」= 把当前拍之后被拆解摘掉的**原件取消退役**放回场上，
+//      不铸造 `-rvN` 新身份（旧 R6 口径「分母 = 初始谱面 + 补发副本」是给重复身份擦屁股的症状修复，DEF-04 已推翻：
+//      一个源障碍同时以原件与副本两个身份进判定流，事件条数会超过谱面、perfectRate 只能靠 Math.min 夹住）。
+//      重开（reset）回同一基线，不跨局累加。对外 `total()`/`baseTotal()` 同为该固定值。
+//   4) **评级**用 DEF-05 裁决的「遭遇口径」分母 `encounterTotal()` = 本局真正进场过的可判事件数
+//      = 真正被判定过（PERFECT/GOOD/有惩罚 MISS）的**不同障碍 id** + 寂静段真正亮起过的光点数。
+//      被 DIS-04「停止生成」整批退役、从未到玩家手上的未来事件**不进这个分母**（它没进过场），
+//      但照样占 §7.3 的固定分母 N —— 两个数各自如实展示，界面不许把两者混为一谈。
+//      复活只是取消退役（DEF-04），id 不变 → 按 id 去重的 Set 天然不膨胀；光点按 Q5 必须计入。
 
 import { BeatClock } from '../../audio/BeatClock.js';
 import { FROZEN } from '../../data/physics.js';
@@ -79,10 +87,13 @@ export class DisassembleSystemCore {
     this._state = 'INTRO';
     this._pool = [];
     this._retired = new Set();
-    this._extra = [];
-    this._seq = { kick: 0, bass: 0, synth: 0 };
+    this._restored = new Set();
     this._denominator = 0;
     this._coreTotal = 0;
+    /** DEF-05 遭遇口径：本局真正进过场的可判障碍 id（按 id 去重，退役/恢复都不重记）。 */
+    this._encounter = new Set();
+    /** DEF-05 / Q5：寂静段真正亮起过的光点拍位（进 SILENCE 才记，没进场的关卡不计）。 */
+    this._dotsLive = new Set();
     this._n = { perfect: 0, corePerfect: 0, good: 0, miss: 0, dotMiss: 0 };
     this.combo = 0;
     this.maxCombo = 0;
@@ -117,11 +128,12 @@ export class DisassembleSystemCore {
     }
     if (Array.isArray(opts.instances)) this.setInstances(opts.instances);
     else {
-      // 换了关卡配置却没带实例表：本局分母的增量（复活补发）必须一起归零，
-      // 否则 total() 会带着上一关的 -rvN 实例进场（跨关累加，K-05 的漂移同类缺陷）。
+      // 换了关卡配置却没带实例表：本局的退役/恢复状态必须一起归零，
+      // 否则会把上一关的 `_retired` id 带进场（跨关累加，K-05 的漂移同类缺陷）。
       this._retired.clear();
-      this._extra = [];
-      for (const t of DIS_TRACKS) this._seq[t] = 0;
+      this._restored.clear();
+      this._encounter.clear();
+      this._dotsLive.clear();
     }
     this.dots = this._buildDots();
     this._state = 'INTRO';
@@ -129,7 +141,7 @@ export class DisassembleSystemCore {
   }
 
   /**
-   * C4 实例表（build() 的输出，可含 bed）。**初始谱面分母在这里定死**。
+   * C4 实例表（build() 的输出，可含 bed）。**固定分母在这里定死**（§7.3：与复活/重开无关）。
    * 判据唯一：`judgable === false` 的一律不是玩家对象（CR-09 批复）。
    */
   setInstances(instances) {
@@ -138,20 +150,23 @@ export class DisassembleSystemCore {
     this._denominator = pool.length;
     this._coreTotal = pool.filter((o) => o.core === true).length;
     this._retired.clear();
-    this._extra = [];
-    for (const t of DIS_TRACKS) this._seq[t] = 0;
+    this._restored.clear();
+    this._encounter.clear();
+    this._dotsLive.clear();
     return this;
   }
 
-  /** 本局重开（R）：hp / 计数 / 队列回基线，分母回到**初始谱面**（_extra 清空，不跨局累加，§7.3 T6）。 */
+  /** 本局重开（R）：hp / 计数 / 退役集回基线，分母始终是同一份**初始谱面**（§7.3 固定分母，T6 不跨局累加）。 */
   reset() {
     for (const t of DIS_TRACKS) {
       this._hp[t] = this._hpMax[t];
       this._disassembleBeat[t] = null;
     }
     this._retired.clear();
-    this._extra = [];
-    for (const t of DIS_TRACKS) this._seq[t] = 0;
+    this._restored.clear();
+    // DEF-05：遭遇口径也是「本局」量，重开必须回零（K-05/T6 的 20 次重开无残留包含它）。
+    this._encounter.clear();
+    this._dotsLive.clear();
     this._n = { perfect: 0, corePerfect: 0, good: 0, miss: 0, dotMiss: 0 };
     this.combo = 0;
     this.maxCombo = 0;
@@ -205,24 +220,25 @@ export class DisassembleSystemCore {
   }
 
   /**
-   * §7.3 + R6 口径修订：分母 = **本局实际出现过的可判定事件数** =
-   * 初始谱面（`_pool`）+ 复活补发的新实例（`_extra`，DIS-05 的 `-rvN`）。
-   * 只数初始谱面会让 `perfect / total` 在有复活的局里冲到 1.9（R6 leader Node 仿真实测），
-   * 结算屏直接印出 190.9% 的 Perfect 率并把评级奖励成 S。
-   * `_extra` 在 reset()/setInstances() 里清空，所以重开基线自动回到初始谱面（K-05，不跨局累加）。
+   * ★ §7.3 固定分母：`总障碍数 N = 本关 noteEvents 生成的「可判定障碍」总数（与复活/重开无关）`。
+   * DEF-04 之前这里是 `初始谱面 + _extra.length`（R6 口径），那是给「复活补发的 -rvN 副本与原件同时可判」
+   * 这个症状擦的屁股：副本让判定流的事件条数超过谱面，于是反过来把分母撑大来让 perfectRate ≤ 1。
+   * 根因修好后（复活 = 取消退役、id 不变）分母天然恒等于谱面，`perfect / total` 的上限就是 1，
+   * 不需要任何补偿项。由 tools/contractTest.mjs 的 def04②③ 与 misstorm D 局守住：
+   * 判定流里出现 `-rvN`、或有惩罚判定条数 > N，都会红。
    */
   total() {
-    return this._denominator + this._extra.length;
+    return this._denominator;
   }
 
-  /** 初始谱面的可判定事件数（DebugPanel / 内容校验用；不随复活变化）。 */
+  /** 初始谱面的可判定事件数（DebugPanel / 内容校验用；§7.3 之后与 total() 同值，字段保留为独立核对）。 */
   baseTotal() {
     return this._denominator;
   }
 
-  /** 核心事件数：同样把复活补发的核心节点算进分母（与 total() 同口径）。 */
+  /** 核心事件数：同为初始谱面口径，不随复活变化（与 total() 同一条固定分母）。 */
   coreTotal() {
-    return this._coreTotal + this._extra.reduce((n, o) => n + (o.core === true ? 1 : 0), 0);
+    return this._coreTotal;
   }
 
   /**
@@ -236,6 +252,12 @@ export class DisassembleSystemCore {
     if (!j || typeof j !== 'object') return null;
     // ① 无惩罚空拍：不扣血、不清连击、不进耐久统计（JDG-04 ③）
     if (j.rule === 'emptyBeat' || j.penalizes === false) return null;
+    // ★ DEF-05 遭遇口径的唯一记账点：一条**有惩罚**判定 = 这一次机会真的给到了玩家。
+    //   被 DIS-04「停止生成」摘队的未来事件既不会 PERFECT 也不会超时 MISS（JudgeSystem._disarmGone
+    //   撤了它的定时器），所以它永远进不了这个 Set；反过来同一原件被退役/恢复多少次都只记一次
+    //   （Set 按 id 去重），复活既不涨分母也不铸新身份（DEF-04）。
+    //   这里不读时间、不改判定，只在 hp 唯一写入口的门口登记，T4 不受影响。
+    if (j.obstacleId) this._encounter.add(String(j.obstacleId));
     const nowSec = this._clock.now();
     if (j.grade === 'MISS') {
       const hit = this.onMiss({ atSec: nowSec, track: j.track, obstacleId: j.obstacleId });
@@ -463,6 +485,9 @@ export class DisassembleSystemCore {
   /**
    * DIS-07：段内光点 MISS = 清连击 + 无敌帧 + 该光点**只重亮一拍**；**不复活任何声部**。
    * 复用 onMiss() 这条唯一 MISS 路径（SILENCE 内它的复活分支恒返回 null），不在这里再写一套「算不算 MISS」。
+   * ★ DEF-05 / Q5 裁决：光点 MISS 只走 `_n.dotMiss`，**不并进 `_n.miss`**（PRD 7.2 那行没有 hp/通关惩罚，
+   *   §7.3 的 `MISS == 0` 指的是有惩罚的障碍 MISS）；它的代价落在**遭遇分母**上——亮过就占一个名额、
+   *   漏踩永不补分子，所以「故意不打光点」只会把自己的评级率拉下来（enc05② 逐关钉住）。
    * @returns {object} 供 WORLD 演出的描述
    */
   dotMiss(beat, opt = {}) {
@@ -524,6 +549,8 @@ export class DisassembleSystemCore {
     const nowSec = this._clock.now();
     for (const d of this.dots) {
       if (d.state !== 'lit') continue;
+      // Q5：光点「亮过」才算一次遭遇事件（进分母）。踩灭算分子、漏踩只扣分——见 encounterRate()。
+      this._dotsLive.add(d.beat);
       const due = d.timeSec + this._goodSec();
       // 进入 SILENCE 时窗口已经过去的 rare case（暂停恢复 / 时钟跳帧）：就地走一次到期检查，
       // 不挂到过去时刻（挂上也永不派发，光点会卡在 lit 既不 MISS 也不 expired）。
@@ -560,10 +587,13 @@ export class DisassembleSystemCore {
   }
 
   /**
-   * §7.3：Perfect 率 = PERFECT 数 / **本局出现过的可判定事件数**（`total()`，含复活补发）。
-   * 分子永远不可能超过「出现过的事件数」（一个事件最多一条有惩罚判定，JDG-05/R5 收口），
-   * 所以值域天然落在 [0,1]；`Math.min(1, …)` 只是最后一道保险：即便上游又出重复计账，
-   * 结算屏也不会印出 190.9% 这种数字（重复计账本身由 contractTest 的 dupIds / 每障碍最多 1 条守住）。
+   * §7.3：Perfect 率 = PERFECT 数 / **固定分母 N**（`total()` = 本关可判定障碍总数，与复活/重开无关）。
+   * 分子永远不可能超过 N（一个事件最多一条有惩罚判定，JDG-05/R5 收口），所以值域天然落在 [0,1]。
+   * `Math.min(1, …)` 保留为最后一道 UI/存档保险：DEF-04 之后真正的保证不在这里，而在
+   * contractTest 的 dupIds / 「每障碍最多 1 条有惩罚判定」/「判定流里不出现 -rvN」三条断言上
+   * （夹住只会把重复计账藏起来，正是 DEF-02 犯过的错，故注释把它标成保险而非口径）。
+   * ★ DEF-05：这个「谱面口径」继续用于**展示与存档**；评级不再用它当尺子（见 rank()），
+   *   否则拆解成功的一局会因为「退役了没进场的未来事件」被自己判成 7%（L1 实测 4/55 → C）。
    */
   perfectRate() {
     const d = this.total();
@@ -576,9 +606,63 @@ export class DisassembleSystemCore {
     return d > 0 ? Math.min(1, this._n.corePerfect / d) : 0;
   }
 
+  /* ---------------- DEF-05 遭遇口径（评级用；§7.3 的 P/N 原样保留在上面） ---------------- */
+
+  /** 本局真正被判定过的**不同**障碍数（退役后再没进场的未来事件不在内）。 */
+  encounterObstacles() {
+    return this._encounter.size;
+  }
+
+  /** 寂静段真正亮起过的光点数（Q5：亮过就要进分母；没进过 SILENCE 的关卡是 0）。 */
+  encounterDots() {
+    return this._dotsLive.size;
+  }
+
+  /** 已踩灭的光点数——遭遇口径的分子里它们与障碍 PERFECT 等值（PRD 7.2「光点是障碍」+ Q5）。 */
+  dotsStomped() {
+    let n = 0;
+    for (const d of this.dots) if (d.state === 'stomped') n += 1;
+    return n;
+  }
+
+  /** ★ 遭遇分母：本局实际进场的可判事件数 = 被判定过的不同障碍 id + 亮起过的光点。 */
+  encounterTotal() {
+    return this._encounter.size + this._dotsLive.size;
+  }
+
+  /** ★ 遭遇分子：障碍 PERFECT 数 + 踩灭光点数。 */
+  encounterPerfect() {
+    return this._n.perfect + this.dotsStomped();
+  }
+
+  /**
+   * ★ 评级尺子：`encounterPerfect / encounterTotal`。
+   * 上限夹到 1 只作末道保险（与 perfectRate() 同理）：若判定流里出现同一 id 的两条 PERFECT，
+   * 分子会超过按 id 去重的分母——那本身是 misstorm/def04 已经钉死不许复发的缺陷。
+   */
+  encounterRate() {
+    const d = this.encounterTotal();
+    return d > 0 ? Math.min(1, this.encounterPerfect() / d) : 0;
+  }
+
+  /**
+   * ★ DEF-05 裁决：评级改用**遭遇口径**，§7.3 的阈值与「C = 通关即保底」一字不动
+   * （S ≥0.85 且 MISS==0 / A ≥0.70 / B ≥0.50）。
+   * 为什么不能再用 P/N：DIS-04 的「hp 归 0 → 停止生成 + 在场碎裂」把该轨未来的 pending 障碍整批摘掉，
+   * 它们从未进场、谁也打不到，却照样占 N —— 实测六张出厂谱面「一个不漏全打中」最高只有
+   * 4/55 ~ 39/83（CONTRACTS DEF-05），S/A/B 全线不可达，UI-03 徽章与 SAV-01「最高评级」都是废功能。
+   * P/N 继续作为**谱面 Perfect 率**展示与存档（`perfectRate()` 一行未改）。
+   *
+   * 光点 MISS 的处理（裁决，写死在这里）：**只进分母、不进分子、不触碰 `MISS == 0` 那道闸**。
+   * · PRD 7.2 明写「寂静段光点 MISS → hp 不变、音轨不变、光点重亮一拍」，表里没有任何 hp/通关惩罚，
+   *   §7.3 的 `MISS == 0` 指的是那一列有惩罚的障碍 MISS（`_n.miss`），把它扩到光点属于加罚，不做；
+   * · Q5 的反刷分机制是**分母**：光点亮过就占一个分母名额、漏踩永不补分子，
+   *   所以「放过 8 个光点」这种打法在 L1 上直接掉到 4/12=0.33 → C（enc05② 逐关断言）。
+   *   要刷 S 就必须把亮过的事件几乎全打中（0.85 允许漏 15%），而漏下的每一个光点都在扣自己的率。
+   */
   rank() {
     const th = (this.cfg && this.cfg.rankThresholds) || { S: 0.85, A: 0.7, B: 0.5 };
-    const r = this.perfectRate();
+    const r = this.encounterRate();
     if (r >= th.S && this._n.miss === 0) return 'S';
     if (r >= th.A) return 'A';
     if (r >= th.B) return 'B';
@@ -590,15 +674,26 @@ export class DisassembleSystemCore {
       state: this._state,
       total: this.total(),
       coreTotal: this.coreTotal(),
-      /** R6 补字段（只增不改）：初始谱面口径，不随复活变化，供 DebugPanel / 内容校验对照。 */
+      /** §7.3 固定分母（与 total() 同值，保留为独立核对口径）：初始谱面的可判定障碍数，不随复活变化。 */
       baseTotal: this._denominator,
       baseCoreTotal: this._coreTotal,
-      /** R6 补字段：本局复活补发的新实例数（= 分母相对初始谱面的增量）。 */
-      revivedIssued: this._extra.length,
+      /** DEF-04 语义修订（字段只增不删，T5）：本局**被取消退役恢复的原件个数**（按 id 去重）。
+       *  旧义是「复活补发的新实例数 = 分母增量」；固定分母下它不再进任何求和，只是观测量。 */
+      revivedIssued: this._restored.size,
       ...this.counts(),
       perfect: this._n.perfect,
       perfectRate: this.perfectRate(),
       coreHitRate: this.coreHitRate(),
+      /** ★ DEF-05 加性字段（T5：只加不改名不删）。`perfectRate` 仍是 §7.3 的谱面口径 P/N；
+       *  评级改用下面这组遭遇口径，两者在结算屏并列展示、各标各的名字。 */
+      encounterObstacles: this.encounterObstacles(),
+      encounterDots: this.encounterDots(),
+      encounterTotal: this.encounterTotal(),
+      encounterPerfect: this.encounterPerfect(),
+      encounterRate: this.encounterRate(),
+      dotsStomped: this.dotsStomped(),
+      /** 与 encounterDots 同值，留作 UI 的独立核对口径（亮起过的光点数 = 进分母的光点数）。 */
+      dotsLive: this.encounterDots(),
       rank: this.rank(),
       hp: this.hpByTrack(),
       disassembled: this.disassembled(),
@@ -616,10 +711,9 @@ export class DisassembleSystemCore {
 
   /* ---------------- 障碍生成（DIS-04/05：停止生成 / 当前拍后恢复、不补发历史） ---------------- */
 
-  /** 当前应当「在场」的实例（WORLD 的 sync 与 JudgeSystem 的注册都用这一份）。 */
+  /** 当前应当「在场」的实例（WORLD 的 sync 与 JudgeSystem 的注册都用这一份）。§7.3：只有原件，无副本。 */
   activeInstances() {
-    const base = this._pool.filter((o) => !this._retired.has(o.id));
-    return base.concat(this._extra);
+    return this._pool.filter((o) => !this._retired.has(o.id));
   }
 
   _retireTrack(track) {
@@ -633,16 +727,21 @@ export class DisassembleSystemCore {
   }
 
   /**
-   * 复活后重新下发该类障碍：只取 **当前拍之后** 且**因拆解被摘掉**的原始事件，复制成新 id 实例
-   * （state:'revived'），不补发历史（DIS-05）。新实例进 _extra：**本局分母 total() = 初始谱面 + _extra 随之上长**
-   * （R6 口径，否则复活局的 perfectRate 会超过 1），而初始谱面 _denominator 与 _pool 长度不变。
-   * 只复制 `_retired` 里的项：hp>0 的声部从未被摘掉，它的未来障碍仍在原实例里，再复制一份就会
-   * 让同一拍出现两个可判定实例（JDG-08 的「同拍只消费 1 次」会吞掉第二个 → 玩家白丢一个障碍）。
+   * DIS-05「该类障碍自当前拍后恢复」= **把当前拍之后被拆解摘掉的原件取消退役**放回场上，
+   * 不补发历史（`beat <= 当前拍` 的原件继续留在 `_retired` 里），**不铸造新身份**。
    *
-   * R5 收口（浏览器实测 MISS 风暴的第二根因）：**一个原始事件在 activeInstances() 里最多占一个名额**。
-   *   · 该事件已经有一份副本（在场或已终态）→ 不再补第二份，也不把原件放回场上（原件继续 `_retired`，
-   *     由副本代表它）；否则原件 + 副本同时可判定，同一拍出现两个对象，pending 从 55 涨到 105，
-   *     MISS 与寂静段的过期补发一起翻倍。
+   * 为什么必须用原件（DEF-04）：旧实现复制一份 `id: ${o.id}-rvN` 放进 `_extra`，于是同一个源障碍
+   * 在判定流里有两个可判身份（原件退役、副本在场）。要维持 §7.3「固定分母」就得分母跟着 `_extra` 长，
+   * 结果是 L1 上一局最多 4/55 → 全员评级 C。取消退役后 id / beat / core 全部不变，
+   * 分母恒等于谱面，且天然满足 R5 的收口「一个原始事件在 activeInstances() 里最多占一个名额」。
+   *
+   * 只处理 `_retired` 里的项：hp>0 的声部从未被摘掉，再放回一次是空操作。
+   * `_retired` 由 `_retireTrack` 只写入 `state==='pending'` 的原件，所以这里放回的对象必然仍是 pending，
+   * JudgeSystem.syncObstacles(requeue:false) 会把它当普通在场障碍重新挂上超时定时器
+   * （`_disarmGone` 在退役时已删掉旧定时器与 `_armed` 记录，因此是重新 arm 而不是复用）。
+   * 已终态（被判过）的原件不可能在 `_retired` 里 → 不会被二次放回，也就不会出现同拍双实例。
+   *
+   * @returns {string[]} 被恢复的**原件 id**（revive 事件的 ids，DIS-05 验收：复活后需再打核心才拆解）
    */
   _regenerate(track, atSec) {
     const cur = this._clock.beatAt(atSec);
@@ -650,19 +749,10 @@ export class DisassembleSystemCore {
     for (const o of this._pool) {
       if (o.track !== track) continue;
       if (!this._retired.has(o.id)) continue;
-      if (!(o.beat > cur + 1e-9)) continue;
-      if (this._extra.some((x) => x.sourceId === o.id)) continue; // 已有一份代表它，不再复制
-      this._seq[track] += 1;
-      const copy = {
-        ...o,
-        id: `${o.id}-rv${this._seq[track]}`,
-        state: 'revived',
-        grade: null,
-        revived: true,
-        sourceId: o.id
-      };
-      this._extra.push(copy);
-      ids.push(copy.id);
+      if (!(o.beat > cur + 1e-9)) continue; // 不补发历史（DIS-05）
+      this._retired.delete(o.id);
+      this._restored.add(o.id);
+      ids.push(o.id);
     }
     return ids;
   }

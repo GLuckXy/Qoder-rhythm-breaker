@@ -218,6 +218,7 @@ export class LevelRuntime {
         cleared: stats.disassembled,
         rank: stats.rank,
         perfectRate: Number(stats.perfectRate.toFixed(4)),
+        encounterRate: Number(stats.encounterRate.toFixed(4)),
         maxCombo: stats.maxCombo,
         miss: stats.miss
       };

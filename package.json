@@ -14,6 +14,7 @@
     "check:level": "node tools/checkLevel.mjs",
     "check:audio": "node tools/audioAssert.mjs",
     "check:render": "node tools/screenshotCheck.mjs",
+    "check:order": "node tools/orderCheck.mjs",
     "verify:all": "node tools/verifyAll.mjs"
   },
   "dependencies": {

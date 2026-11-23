@@ -303,3 +303,60 @@ DEF-02 我裁定「分母 = 本局实际出现过的可判事件数」，CORE-6 
 **结案前必须回读需求原文对应条款并把原文抄进卡片**；凡「实现如此所以口径如此」的推理，一律先问
 「需求是不是本来另有所指」。评级 S/A/B 在现行实现下不可达（`perfect` 上限 ≈ 各轨 hp 之和，L1 为 4/55=7.3%），
 是这次回读才暴露出来的功能性缺陷，比 DEF-02 本身严重。
+
+---
+
+## R8 · 提交站推送路线（网络实况，别再重新试错）
+
+本轮 `git push origin main` 连续失败：`schannel: failed to receive handshake, SSL/TLS connection failed`。
+逐层排查结论：
+
+| 通道 | 结果 |
+|---|---|
+| 直连 `https://github.com` | 不通（`curl --noproxy '*'` rc=000，SSH 22 端口也不通） |
+| Qoder 代理 `$HTTPS_PROXY`（127.0.0.1:14609） | `api.github.com` 200，但 `CONNECT github.com:443` 被拒 407，`github.com/info/refs` 超时 |
+| 系统代理 127.0.0.1:7892 | 进程没在监听（`ProxyEnable=0`） |
+| **`ssh://git@ssh.github.com:443/...`** | **通**，`Hi GLuckXy! You've successfully authenticated` |
+
+可用的推送命令（不改 git config，按需用）：
+
+```bash
+GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=no" \
+  git push ssh://git@ssh.github.com:443/GLuckXy/Qoder-rhythm-breaker.git main
+```
+
+`origin` 仍指向 HTTPS URL（保持不动，网络恢复即可用）。已推送：`a0ac3ee..f09f016`（DEF-03 修复 + 五道门禁 + 浏览器结案证据）。
+注意 `api.github.com/repos/GLuckXy/Qoder-rhythm-breaker` 未认证时返回 404，说明仓库是 **private**
+（与「公共提交站」的说法需要对齐——若确实要公开，需在 GitHub 设置里改可见性，这属账号操作，未擅自执行）。
+
+---
+
+## R9 · DEF-04 + DEF-05 落地（评级从「不可达」变为「可刷但刷不动」）
+
+CORE-7 修根因、CORE-8 补口径，leader 全部独立复跑确认（不是转述）：
+
+| 项 | 结果 |
+|---|---|
+| `verify:all` | `5/5 PASS, 0 SKIP, 0 FAIL`（contract **802/802 · 17 case** · order 17 项 · level/audio/render 全 OK） |
+| `npx eslint src tools` | exit 0，无输出 |
+| DEF-04 红样 | `分母恒为初始谱面 24 — 期望 24，实际 29`、`复活下发的是原件 id — 期望 0，实际 3` 等 7 条 |
+| DEF-05 红样 | 六关全打中仍 `L1 C / L2 C / L3 B / L4 C / L5 B / L6 C`（S 不可达） |
+| 遭遇口径六关绿样 | `L1 12/12 · L2 39/39 · L3 45/45 · L4 51/51 · L5 45/45 · L6 48/48 → 全 S` |
+| 反刷分 | 只打 4 下核心不打光点：`L1 0.333`、其余 `≤0.08` → 全 C，断言 `Δ ≥ 0.30` |
+
+浏览器结案证据 `.agent/e2e/stdout-run7.txt`（机器空载，`fps≈180`）：
+
+```
+· 终态 state=RESULT ui节点=1  游戏自身 console 错误数 = 0
+· 结算屏同时给出两个口径：评级 Perfect 率 33.3%（4/12 遭遇）· 谱面 Perfect 率 7.3%（4/55 固定分母）
+· 存档 levels={"1":{"cleared":true,"rank":"C","perfectRate":0.0727,"maxCombo":4,"miss":0,"encounterRate":0.3333}}
+· 重开 20 次：done → 重开后 pending=55 ignored=39 running=true
+```
+
+`encounterRate` 进档这一条是 leader 接线（`LevelRuntime._writeSave:221`，CORE-8 无权改 `scenes/`），
+浏览器实测的是**接线后的真值**，不是 Node 侧直接调 `save.js` 的替身断言。
+有意思的是这一局本身就把 Q5 的意图演出来了：自动打点器只打障碍、不踩寂静段光点，
+8 个光点全过期 → 遭遇口径也只有 `4/12` → **评级 C**。搁旧口径这就是「打 4 下收工」的刷分窗口。
+
+DEF-05 属需求缺口，口径已写进 `.agent/CONTRACTS.md` 并同步 README 已知限制第 11 条，**待需求方复核**；
+备选口径（拆解不退役 / 只退役在场 / 重排谱面）记在同一张卡里，未采用不等于被否定。

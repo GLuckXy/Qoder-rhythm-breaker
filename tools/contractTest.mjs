@@ -720,7 +720,8 @@ async function caseSave() {
   eq('save: levels[2] 缺 cleared/perfectRate/maxCombo → 补默认', `${s1.levels['2'].cleared}/${s1.levels['2'].rank}/${s1.levels['2'].maxCombo}`, 'false/A/0');
   near('save: levels[2].perfectRate 保留 0.74', s1.levels['2'].perfectRate, 0.74, 1e-12);
   eq('save: 前向兼容——未知顶层字段原样保留', s1.futureField?.keep, 1);
-  eq('save: levelEntry 缺关给完整默认', JSON.stringify(levelEntry(s1, 5)), JSON.stringify(defaultSave().levels?.['5'] ?? { cleared: false, rank: null, perfectRate: 0, maxCombo: 0, miss: 0 }));
+  // DEF-05/SAV-01（T5 加性字段）：默认档多一个 encounterRate=0，其余字段语义不变。
+  eq('save: levelEntry 缺关给完整默认', JSON.stringify(levelEntry(s1, 5)), JSON.stringify(defaultSave().levels?.['5'] ?? { cleared: false, rank: null, perfectRate: 0, maxCombo: 0, miss: 0, encounterRate: 0 }));
 
   // --- 类型防护 ---
   const junk = mergeSave({ version: 'x', audio: { master: 'loud', muted: 'yes', latencyOffset: 9999 }, levels: { abc: { rank: 'Z' }, 1: { rank: 'S', perfectRate: 5, maxCombo: -3 } }, options: 42, meta: null });
@@ -1360,15 +1361,17 @@ async function caseReviveTie() {
   const beatNow = 34;
   const pick2 = ds.onMiss({ atSec: clock.timeAtBeat(beatNow) });
   eq('revive-tie: 已拆空者被 MISS 复活', pick2, 'synth');
-  const revived = ds.activeInstances().filter((o) => o.state === 'revived');
-  eq('revive-tie: 复活新实例数 = 当前拍之后的原始事件数', revived.length, 5);
+  const revived = ds.activeInstances().filter((o) => o.track === 'synth' && o.beat > beatNow);
+  eq('revive-tie: 复活恢复的原件数 = 当前拍之后的原始事件数', revived.length, 5);
   ok('revive-tie: 复活实例的 beat 全部 > 当前拍（不补发历史，DIS-05）', revived.every((o) => o.beat > beatNow), JSON.stringify(revived.map((o) => o.beat)));
-  ok('revive-tie: 复活实例 id 带 -rvN 后缀且与源 id 不同', revived.every((o) => /-rv\d+$/.test(o.id) && o.sourceId !== o.id));
-  // R6 口径修订：分母 = 本局实际出现过的可判定事件数。复活补发的新实例是玩家真能打的对象，
-  // 不进分母就会让 perfectRate 倒挂（leader Node 仿真实测 1.909）。初始谱面单独由 baseTotal() 守住。
-  eq('misstorm/revive-tie: 复活把补发实例算进分母（total = 初始谱面 + 复活数）', ds.total(), 24 + revived.length);
+  // DEF-04 口径修订（替换 R6 的「补发新实例」）：复活 = 把当前拍之后的**原件取消退役**，
+  // 不铸造 -rvN 新身份；否则同一源障碍有两个可判身份，事件流条数超过谱面，§7.3 的「固定分母」被破坏。
+  ok('revive-tie: 复活实例就是原件本身（id 无 -rvN 后缀，未新增身份）', revived.every((o) => !/-rv\d+$/.test(o.id)), JSON.stringify(revived.map((o) => o.id)));
+  eq('revive-tie: 复活后在场实例回到谱面原状（24 个可判定原件里只剩 3 个历史障碍不在场，无副本）', ds.activeInstances().length, ds.total() - 3);
+  eq('revive-tie: 分母恒为初始谱面 24（§7.3 固定分母，与复活/重开无关）', ds.total(), 24);
   eq('revive-tie: 初始谱面分母不随复活变化（baseTotal，bed 仍不计入）', ds.baseTotal(), 24);
-  eq('revive-tie: 核心分母与 total 同口径增长（coreTotal = 24 + 复活核心数）', ds.coreTotal(), 24 + revived.length);
+  eq('revive-tie: 核心分母同为谱面口径 24（不随复活增长）', ds.coreTotal(), 24);
+  eq('revive-tie: revivedIssued = 本局被取消退役的原件个数', ds.stats().revivedIssued, 5);
   eq('revive-tie: 复活后实例 id 全表唯一（不出现同拍双实例）', new Set(ds.activeInstances().map((o) => o.id)).size, ds.activeInstances().length);
   eq('revive-tie: 复活后 hp = REVIVE_HP', ds.hp('synth'), DS.REVIVE_HP);
   eq('revive-tie: hp-change 事件的 reason 标注 revive', reviveEvents.length > 0 && hpEvents.some((p) => p.reason === 'revive'), true);
@@ -2041,6 +2044,29 @@ async function caseScreens() {
     eq('screens: 评级取 ds.rank()（界面不自算第二套口径）', findByRole(ui.element(), 'rank').textContent, stats.rank);
     ok('screens: Perfect 率按 §7.3 口径显示', textOf(ui.element()).some((t) => t.includes(`${(stats.perfectRate * 100).toFixed(1)}%`)));
     ok('screens: 面板把「背景层不计入」写明白', textOf(ui.element()).some((t) => t.includes('可判定障碍') && t.includes('背景层不计入')));
+    // DEF-04：分母是固定的谱面数，文案里不得再出现「+ 复活补发 R」这种将复活算进分母的求和写法。
+    eq('screens: 分母文案不再把复活补发加进分母（§7.3 固定分母）', textOf(ui.element()).some((t) => t.includes('复活补发')), false);
+    await ui.showResult({ ...stats, revivedIssued: 28 }, { level: l1 });
+    ok('screens: 复活恢复只作为不改分母的观测量出现', textOf(ui.element()).some((t) => t.includes(`本关可判定障碍 ${judgable}`) && t.includes('复活恢复 28（不改分母）')), textOf(ui.element()).find((t) => t.includes('可判定障碍')) || '(缺)');
+    // DEF-05：结算屏要能说清「评级用的是哪个数」——两个率同屏、各自标出口径，且不是同一个数。
+    const encTxt = textOf(ui.element());
+    ok(
+      'screens: 评级 Perfect 率（遭遇口径）与谱面 Perfect 率（§7.3）同屏分别显示',
+      encTxt.some((t) => t.includes('评级 Perfect 率')) &&
+        encTxt.some((t) => t.includes('谱面 Perfect 率')) &&
+        encTxt.some((t) => t.includes(`${(stats.encounterRate * 100).toFixed(1)}%`)) &&
+        encTxt.some((t) => t.includes(`${(stats.perfectRate * 100).toFixed(1)}%`)),
+      `评级率=${encNum(stats.encounterRate)} 谱面率=${stats.perfectRate}`
+    );
+    ok(
+      'screens: 评级口径那行把分子分母拆开写（PERFECT + 踩灭光点 / 遭遇障碍 + 进场光点）',
+      encTxt.some((t) => t.includes('评级口径') && t.includes(`${encNum(stats.encounterPerfect)}/${encNum(stats.encounterTotal)}`)),
+      encTxt.find((t) => t.includes('评级口径')) || '(缺)'
+    );
+    await ui.showResult({ perfect: 1, total: 2, baseTotal: 2, perfectRate: 0.5, rank: 'C' }, { level: l1 });
+    const legacyBox = findByRole(ui.element(), 'encounter-rate');
+    ok('screens: 老快照缺 encounter 字段 → 评级率显示占位「—」而不是假数字', Boolean(legacyBox) && textOf(legacyBox).some((t) => t.includes('—')), legacyBox ? textOf(legacyBox).join('|') : '(缺节点)');
+    await ui.showResult(stats, { level: l1 });
     const outBtn = findByRole(ui.element(), stats.disassembled ? 'result-next' : 'result-next-incomplete');
     ok('screens: 结算有下一步出口（K-15 零断点）', Boolean(outBtn));
     outBtn.click();
@@ -2295,8 +2321,10 @@ async function caseMissStorm() {
     note(`misstorm：A 局 miss=${stA.miss} 队列峰值=${runA.probe.maxPending}；B 局 miss=${stB.miss}；C 局 miss=${st.miss} resync=${probe.resyncs}`);
   }
 
-  /* —— ④ R6 分母回归（D 局）：只打鼓、放过 bass/synth → 拆鼓 → 复活补发 -rvN → 补发实例被判定 ——
-     旧口径下这些新事件计入分子却不计入分母（leader 的 Node 仿真实测 perfectRate=1.909、评级还报 S）。 */
+  /* —— ④ DEF-04 分母回归（D 局）：只打鼓、放过 bass/synth → 拆鼓 → MISS 复活原件 → 原件再被判定 ——
+     旧口径（R6）把复活补发的 -rvN 副本算进分母，用来掩盖「副本与原件是同一障碍的两个身份」这件事；
+     §7.3 的分母是「本关 noteEvents 生成的可判定障碍总数（固定分母，与复活/重开无关）」，所以这里改成：
+     分母 == 初始谱面，且判定流里不得出现 -rvN。 */
   {
     const cfgD = synthCfg({
       sections: [
@@ -2321,45 +2349,487 @@ async function caseMissStorm() {
     const probeD = { resyncs: 0, maxQueue: 0, maxPending: 0, dupIds: 0 };
     const rig = { clock, judge, ds, instances: inst, feed: [], ev: [], JS };
     wireRuntimeResync(rig, probeD);
+    const rvIds = [];
+    ds.on('revive', (p) => {
+      for (const id of p.ids || []) rvIds.push(id);
+    });
     judge.onJudgment((j) => {
       rig.feed.push(j);
       ds.onJudgment(j);
     });
-    const judgable = inst.filter((o) => o.judgable !== false).length;
+    const chartIds = new Set(inst.filter((o) => o.judgable !== false).map((o) => o.id));
+    const judgable = chartIds.size;
     const seenIds = new Set(); // 本局在判定队列里**实际出现过**的不同可判 id（分母的独立核对口径）
+    const restored = new Set(); // 复活事件下发的 id（改后 = 被取消退役的原件）
     while (clock.time() < clock.timeAtBeat(cfgD.lengthBeats) + 1.5) {
       clock.advanceBy(0.025);
       const pend = judge.pendingList();
       for (const o of pend) seenIds.add(o.id);
-      // 命中策略：只打「当前在队列里的 kick」（含 DIS-05 复活补发的 -rvN 新实例），其余全部放过
+      // 命中策略：只打「当前在队列里的 kick」（含 DIS-05 复活恢复的原件），其余全部放过
       for (const o of pend) {
         if (o.track !== 'kick') continue;
         if (o.timeSec <= clock.time() + 0.001 && o.timeSec > clock.time() - 0.06) judge.onInput(JS.expectedAction(o.type), o.timeSec);
       }
+      for (const id of rvIds) restored.add(id);
       probeD.maxPending = Math.max(probeD.maxPending, judge.pendingCount());
       if (ds.state() === 'RESULT') break;
     }
     const penalizedD = rig.feed.filter((j) => j.penalizes !== false && j.rule !== 'emptyBeat');
-    const rvJudged = penalizedD.filter((j) => /-rv\d+$/.test(j.obstacleId)).length;
+    const rvJudged = penalizedD.filter((j) => /-rv\d+$/.test(String(j.obstacleId))).length;
+    const rvPerfect = penalizedD.filter((j) => restored.has(j.obstacleId) && j.grade === 'PERFECT').length;
     const stD = ds.stats();
-    // 防风暴的三条照旧守着（不许放松）：复活补发也不许让同一障碍出现两条有惩罚判定
+    // 防风暴的三条照旧守着（不许放松）：复活也不许让同一障碍出现两条有惩罚判定
     eq('misstorm: D 局每个障碍最多 1 条有惩罚判定', new Set(penalizedD.map((j) => j.obstacleId)).size, penalizedD.length);
     eq('misstorm: D 局队列内 id 无重复', probeD.dupIds, 0);
-    ok('misstorm: D 局队列峰值 ≤ 本局出现过的可判事件数', probeD.maxPending <= stD.total, `峰值 ${probeD.maxPending} / 分母 ${stD.total}`);
-    // 前置：本局确实出现了 -rvN 事件、且事件总数已经超过初始谱面（否则下面的分母断言是空跑的绿）
-    ok('misstorm: D 局复活补发实例进入了判定流（rv 事件 > 0）', rvJudged > 0, `rv 判定条数=${rvJudged} / 有惩罚判定=${penalizedD.length} / 初始谱面=${judgable}`);
-    ok('misstorm: D 局本局可判事件数 > 初始谱面（旧固定分母的缺陷场景成立）', penalizedD.length + rvJudged > judgable, `判定=${penalizedD.length} + rv=${rvJudged} / 初始谱面=${judgable}`);
-    // ★ 分母口径的独立核对：total 必须等于「判定队列里真实出现过的不同 id 数」（初始谱面 + 复活补发）。
-    //   这条在改动前必红：旧实现只数初始谱面 18，而本局出现了 20 个不同可判事件。
-    eq('misstorm: D 局分母 = 本局出现过的不同可判 id 数（独立核对，含 -rvN）', stD.total, seenIds.size);
+    ok('misstorm: D 局队列峰值 ≤ 初始谱面（副本不再占队列名额）', probeD.maxPending <= judgable, `峰值 ${probeD.maxPending} / 谱面 ${judgable}`);
+    // 前置：本局确实发生了带 id 的复活（否则下面的分母断言是空跑的绿）
+    ok('misstorm: D 局复活确实下发过原件 id（rv 事件 > 0）', rvIds.length > 0, `恢复原件=${rvIds.length} / 有惩罚判定=${penalizedD.length} / 初始谱面=${judgable}`);
+    // ★ 口径改动①（原：`rvJudged > 0`「补发实例进入了判定流」）：§7.3 的固定分母要求**不得**出现 -rvN 身份。
+    eq('misstorm: D 局判定流里不出现 -rvN（复活恢复的是原件，DEF-04）', rvJudged, 0);
+    // ★ 口径改动②（原：「本局可判事件数 > 初始谱面」）：PRD §7.3「总障碍数 N = 本关 noteEvents 生成的可判定障碍总数」，
+    //   事件流条数超过谱面正是 DEF-04 的缺陷本身，而不是需要迁就的现象。
+    ok('misstorm: D 局有惩罚判定条数 ≤ 初始谱面（事件流不超发）', penalizedD.length <= judgable, `判定=${penalizedD.length} / 初始谱面=${judgable}`);
+    eq('misstorm: D 局判定 id 全部属于初始谱面', penalizedD.filter((j) => !chartIds.has(j.obstacleId)).length, 0);
+    // ★ 口径改动③（原：`total === seenIds.size`＝「初始谱面 + 复活补发」）：分母固定为初始谱面，
+    //   与复活无关；队列里出现过的不同 id 也只可能是谱面那 18 个原件。
+    eq('misstorm: D 局分母 = 初始谱面可判定障碍数（§7.3 固定分母）', stD.total, judgable);
+    eq('misstorm: D 局队列出现过的不同可判 id 数 = 分母（独立核对，无第 19 个身份）', seenIds.size, stD.total);
     ok('分母含复活事件：total ≥ perfect+good+miss', stD.total >= stD.perfect + stD.good + stD.miss, `total=${stD.total} / P${stD.perfect}+G${stD.good}+M${stD.miss} / 初始谱面=${stD.baseTotal}`);
     eq('perfectRate 不超过 1', stD.perfectRate <= 1, true);
-    ok('misstorm: D 局 perfectRate 的分母是出现事件数而非初始谱面', Math.abs(stD.perfectRate - stD.perfect / seenIds.size) < 1e-12, `perfectRate=${stD.perfectRate.toFixed(6)} / P${stD.perfect}÷${seenIds.size}`);
-    ok('misstorm: D 局 coreTotal 与 total 同口径（复活的核心节点算进分母）', stD.coreTotal >= stD.baseCoreTotal + rvJudged && stD.coreHitRate <= 1, `coreTotal=${stD.coreTotal} / base=${stD.baseCoreTotal} / rv=${rvJudged} / coreHitRate=${stD.coreHitRate.toFixed(3)}`);
+    // ★ 口径改动④（原：perfectRate == perfect / seenIds.size，即含补发的「本局出现事件数」）：§7.3 Perfect率 = P / N，N 固定。
+    ok('misstorm: D 局 perfectRate 的分母是固定谱面数', Math.abs(stD.perfectRate - stD.perfect / judgable) < 1e-12, `perfectRate=${stD.perfectRate.toFixed(6)} / P${stD.perfect}÷${judgable}`);
+    // ★ 口径改动⑤（原：coreTotal ≥ baseCoreTotal + rvJudged）：核心分母同为谱面口径，不随复活增长。
+    ok('misstorm: D 局 coreTotal 与 total 同口径（固定谱面，不随复活增长）', stD.coreTotal === stD.baseCoreTotal && stD.coreHitRate <= 1, `coreTotal=${stD.coreTotal} / base=${stD.baseCoreTotal} / 恢复原件=${stD.revivedIssued} / coreHitRate=${stD.coreHitRate.toFixed(3)}`);
     ok('misstorm: D 局（拆完又复活、放过两轨）评级不再被奖励成 S', stD.rank !== 'S', `rank=${stD.rank} perfectRate=${stD.perfectRate.toFixed(3)} miss=${stD.miss}`);
     ds.reset();
     eq('misstorm: D 局 reset 后分母回初始谱面基线（K-05，不跨局累加）', `${ds.total()}/${ds.coreTotal()}`, `${judgable}/${judgable}`);
-    note(`misstorm：D 局（只打鼓）事件=${penalizedD.length} 分母=${stD.total}（初始 ${stD.baseTotal}）rv 判定=${rvJudged} perfect=${stD.perfect} miss=${stD.miss} perfectRate=${stD.perfectRate.toFixed(3)} rank=${stD.rank}`);
+    note(`misstorm：D 局（只打鼓）事件=${penalizedD.length} 分母=${stD.total}（初始 ${stD.baseTotal}）恢复原件=${stD.revivedIssued} 其中再被判 PERFECT=${rvPerfect} perfect=${stD.perfect} miss=${stD.miss} perfectRate=${stD.perfectRate.toFixed(3)} rank=${stD.rank}`);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* case: def04 — DEF-04 §7.3 固定分母 + 复活=取消退役（不铸 -rvN 新身份）   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * def04 用实例表：与 synthInstances 同形，但**能逐个指定 core**。
+ * DIS-02 只有核心节点的 PERFECT 掉 hp，评级可达性完全取决于核心节点落在谱面的哪个位置，
+ * synthInstances 把非 bed 全标 core，表达不了这件事，所以这里另给一份（不动他人已在用的夹具）。
+ */
+function defInstances(clock, spec) {
+  const TYPE = { kick: 'spike', bass: 'platform', synth: 'barrage', bed: 'bed' };
+  const out = [];
+  for (const [track, list] of Object.entries(spec)) {
+    for (const entry of list) {
+      const beat = Array.isArray(entry) ? entry[0] : entry;
+      const core = Array.isArray(entry) ? entry[1] !== false : track !== 'bed';
+      out.push({
+        id: `d-${track}-${beat}`,
+        track,
+        type: TYPE[track],
+        beat,
+        timeSec: clock.timeAtBeat(beat),
+        core,
+        pitchTier: 0,
+        speed: 1,
+        state: 'pending',
+        grade: null,
+        judgable: track !== 'bed'
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * buildRig + LevelRuntime 的**同构接线**（DEF-03 的教训：测试不得换掉被测对象的接线）：
+ * 拆解「停止生成」与复活「恢复」都经由 `judge.syncObstacles(ds.activeInstances())` 回到判定队列，
+ * 与 src/game/scenes/LevelRuntime.js:183 / :192 一致。buildRig 没有这条回线，所以它验不出退役/恢复的影响。
+ * @param {(clock:object)=>object[]} build 实例表工厂（defInstances 或 PG.build）
+ */
+function defRig(MC, JS, DS, cfg, build) {
+  const clock = new MC.MockClock({ t: 0 });
+  clock.init({ bpm: cfg.bpm, sections: cfg.sections, tempoChanges: cfg.tempoChanges, introBeats: cfg.introBeats, lengthBeats: cfg.lengthBeats });
+  clock.start(0);
+  const inst = build(clock);
+  const events = new JS.EventLog();
+  const judge = JS.createJudgeSystem({ clock, events });
+  const ds = DS.createDisassembleSystem({ clock, events });
+  judge.setWindowScale(Number.isFinite(Number(cfg.windowScale)) ? Number(cfg.windowScale) : 1);
+  ds.load(cfg, { instances: inst });
+  ds.bindJudge(judge);
+  ds.attach();
+  judge.registerObstacles(inst);
+  const rig = {
+    cfg,
+    clock,
+    judge,
+    ds,
+    JS,
+    instances: inst,
+    events,
+    feed: [],
+    ev: [],
+    reviveIds: [],
+    reviveEvents: 0,
+    restoredLive: [],
+    hpAtRevive: [],
+    probe: { resyncs: 0, maxQueue: 0, maxPending: 0, dupIds: 0 }
+  };
+  wireRuntimeResync(rig, rig.probe); // 先注册：队列重同步是 LevelRuntime 里第一位的订阅者
+  ds.on('revive', (p) => {
+    rig.reviveEvents += 1;
+    const live = new Set(rig.judge.pendingList().map((o) => o.id)); // 重同步**之后**：恢复的原件是否真回到了待判定队列
+    for (const id of p.ids || []) {
+      rig.reviveIds.push(id);
+      if (live.has(id)) rig.restoredLive.push(id);
+    }
+    rig.hpAtRevive.push(rig.ds.hp(p.track));
+    rig.ev.push({ name: 'revive', ...p });
+  });
+  for (const name of ['hp-change', 'disassemble', 'state-change']) ds.on(name, (p) => rig.ev.push({ name, ...p }));
+  judge.onJudgment((j) => {
+    rig.feed.push(j);
+    ds.onJudgment(j);
+  });
+  return rig;
+}
+
+/**
+ * 理想玩家：25ms 轮询，只对「当前在判定队列里且已到时刻」的障碍按键；want(o) 决定打不打。
+ * opt.stomp（DEF-05 / Q5）：寂静段亮起的光点也逐个踩灭 —— 「把真正进场的事件全打中」的玩家
+ * 必须包含光点，否则光点只进分母不进分子，任何关卡的最高评级都会被自己写死的玩家模型压低。
+ */
+function defPlay(rig, want, opt = {}) {
+  const step = 0.025;
+  const end = rig.clock.timeAtBeat(Number(rig.cfg.lengthBeats) || 0) + 1.5;
+  const attempted = [];
+  let dotPtr = 0;
+  while (rig.clock.time() < end) {
+    rig.clock.advanceBy(step);
+    for (const o of rig.judge.pendingList()) {
+      if (!(o.timeSec <= rig.clock.time() + 0.001 && o.timeSec > rig.clock.time() - 0.06)) continue;
+      if (!want(o)) continue;
+      attempted.push(o.id);
+      rig.judge.onInput(rig.JS.expectedAction(o.type), o.timeSec);
+    }
+    if (opt.stomp && rig.ds.state() === 'SILENCE') {
+      const dots = rig.ds.silenceDots();
+      while (dotPtr < dots.length && rig.clock.time() >= dots[dotPtr].timeSec) {
+        rig.ds.stompDot({ atSec: dots[dotPtr].timeSec });
+        dotPtr += 1;
+      }
+    }
+    rig.probe.maxPending = Math.max(rig.probe.maxPending, rig.judge.pendingCount());
+    if (rig.ds.state() === 'RESULT') break;
+  }
+  return attempted;
+}
+
+const rvStream = (rig) => rig.events.events.filter((e) => e.kind === 'judge' && /-rv\d+/.test(String(e.id))).length;
+
+async function caseDef04() {
+  const MC = await load('src/mocks/MockClock.js', 'def04');
+  const JS = await load('src/game/systems/JudgeSystem.js', 'def04');
+  const DS = await load('src/game/systems/DisassembleSystem.js', 'def04');
+  const PG = await load('src/game/systems/PatternGenerator.js', 'def04');
+  if (!MC || !JS || !DS || !PG) return;
+
+  /* —— ① 评级 S 在产品同构接线下确实可达：每声部恰好 4 个核心节点、且落在该轨最后事件上 —— */
+  {
+    const cfg = synthCfg({ tracks: { kick: { hp: 4 }, bass: { hp: 4 }, synth: { hp: 4 }, bed: { hp: 0, disassemble: false } } });
+    const spec = {
+      kick: [[8, false], [10, false], [12, false], [14, false], [16, false], [18, false], [20, true], [24, true], [28, true], [32, true]],
+      bass: [[9, false], [11, false], [13, false], [15, false], [22, true], [26, true], [30, true], [34, true]],
+      synth: [[17, false], [19, false], [21, true], [25, true], [29, true], [33, true]],
+      bed: [[40, false], [44, false]]
+    };
+    const rig = defRig(MC, JS, DS, cfg, (c) => defInstances(c, spec));
+    // DEF-05/Q5：评级改走遭遇口径，光点也属于「进场过的可判事件」，所以这里的「全打中」玩家
+    // 必须连寂静段光点一起踩灭，否则它自己就把 S 打不成（断言一个字没松，仍要求 1/S）。
+    defPlay(rig, () => true, { stomp: true });
+    const st = rig.ds.stats();
+    eq('def04①: 前置——24 个可判定障碍 / 12 个核心节点（§7.3「M ≥ 12，三声部各 4」）', `${st.baseTotal}/${st.coreTotal}`, '24/12');
+    eq('def04①: 按谱面全打中 → perfect === total()（§7.3 的 PERFECT 上限 = N）', `${st.perfect}/${st.total}`, '24/24');
+    eq('def04①: 全打中 → MISS 0', st.miss, 0);
+    eq('def04①: 全打中（含光点）→ 评级 S 可达（DEF-05 遭遇口径 ≥0.85 且 MISS==0）', `${st.perfectRate}/${st.rank}`, '1/S');
+    eq('def04①: 三声部全拆完', `${rig.ds.disassembled()}/${JSON.stringify(rig.ds.disassembledTracks())}`, 'true/["kick","bass","synth"]');
+    eq('def04①: 这一局没有复活（分母与复活无关的极端情形）', rig.reviveEvents, 0);
+    eq('def04①: 队列 id 无重复 / 队列长度不超谱面', `${rig.probe.dupIds}/${rig.probe.maxQueue <= 24}`, '0/true');
+    eq('def04①: 跑到终点 RESULT', st.state, 'RESULT');
+    note('def04①：评级 S 的前提是「每声部第 4 个核心节点落在该轨的最后一个事件」——核心节点若在谱面中段，DIS-04 的停止生成会让剩下的障碍永不可判，perfect 上限随之掉到 N 以下。');
+  }
+
+  /* —— ② 复活 = 取消退役：原件回到场上、id 不变、分母不变、且真的又能在 JudgeSystem 里被判 —— */
+  {
+    const cfg = synthCfg({ tracks: { kick: { hp: 4 }, bass: { hp: 4 }, synth: { hp: 0 }, bed: { hp: 0, disassemble: false } } });
+    const spec = {
+      kick: [[8, false], [9, true], [10, true], [11, true], [12, true], [12.5, false], [40, false], [42, false], [46, true]],
+      bass: [[14, false], [30, false]],
+      bed: [[13, false], [15, false]]
+    };
+    const rig = defRig(MC, JS, DS, cfg, (c) => defInstances(c, spec));
+    const chartIds = new Set(rig.instances.filter((o) => o.judgable !== false).map((o) => o.id));
+    defPlay(rig, (o) => !(o.track === 'bass' && o.beat === 14)); // 唯一放过的一发 → MISS → 复活 hp 最小的 kick
+    const st = rig.ds.stats();
+    const penalized = rig.feed.filter((j) => j.penalizes !== false && j.rule !== 'emptyBeat');
+    const ids = penalized.map((j) => j.obstacleId);
+    eq('def04②: 前置——kick 两次拆空（beat 12 与复活后的 beat 46，DIS-05「复活后需再打核心才拆解」）', rig.ev.filter((e) => e.name === 'disassemble' && e.track === 'kick').length, 2);
+    ok('def04②: 前置——这一局真的发生了带 id 的复活', rig.reviveEvents > 0 && rig.reviveIds.length > 0, `revive=${rig.reviveEvents} ids=${rig.reviveIds.length}`);
+    eq('def04②: 复活下发的是**原件 id**（不铸 -rvN 新身份）', rig.reviveIds.filter((id) => /-rv\d+$/.test(id) || !chartIds.has(id)).length, 0);
+    eq('def04②: 被恢复的原件 = 当前拍之后的 3 个退役 kick', [...rig.reviveIds].sort().join(','), 'd-kick-40,d-kick-42,d-kick-46');
+    eq('def04②: 历史障碍不补发（beat ≤ 当前拍的 12.5 仍不在场，DIS-05）', rig.ds.activeInstances().some((o) => o.beat === 12.5), false);
+    eq('def04②: 复活后 hp → 1（不是 4，DIS-05）', rig.hpAtRevive.join(','), '1');
+    eq('def04②: 恢复的原件当场回到待判定队列（JudgeSystem 已重新挂上超时定时器）', rig.restoredLive.length, 3);
+    eq('def04②: 恢复的原件真的又被判到（PERFECT 且 obstacleId 就是原件）', ['d-kick-40', 'd-kick-42', 'd-kick-46'].filter((id) => penalized.some((j) => j.obstacleId === id && j.grade === 'PERFECT')).length, 3);
+    eq('def04②: 分母恒定 = 初始谱面 11（§7.3「与复活/重开无关」+ DIS-05 验收「分母不变」）', `${st.total}/${st.baseTotal}`, '11/11');
+    eq('def04②: 核心分母同为谱面口径（5，不随复活增长）', `${st.coreTotal}/${st.baseCoreTotal}`, '5/5');
+    eq('def04②: revivedIssued = 本局被恢复的原件个数（语义改到 §7.3 口径）', st.revivedIssued, 3);
+    eq('def04②: 有惩罚判定的 id 全部属于初始谱面', ids.filter((id) => !chartIds.has(id)).length, 0);
+    eq('def04②: 每个源障碍最多 1 条有惩罚判定（原件+副本双身份被杜绝）', new Set(ids).size, ids.length);
+    eq('def04②: C7 事件流里不出现 -rvN', rvStream(rig), 0);
+    eq('def04②: activeInstances 内 id 唯一（同一原件不占两个名额）', new Set(rig.ds.activeInstances().map((o) => o.id)).size, rig.ds.activeInstances().length);
+    eq('def04②: 数字：perfect 9 / miss 1 → 9/11 → 评级 A（评级不再恒为 C）', `${st.perfect}/${st.miss}/${st.rank}`, '9/1/A');
+    eq('def04②: 队列 id 无重复 / 队列长度不超谱面', `${rig.probe.dupIds}/${rig.probe.maxQueue <= 11}`, '0/true');
+    eq('def04②: 跑到终点 RESULT', st.state, 'RESULT');
+    note(`def04②：perfect=${st.perfect} good=${st.good} miss=${st.miss} 分母=${st.total}（初始 ${st.baseTotal}）恢复原件=${st.revivedIssued} Perfect率=${st.perfectRate.toFixed(3)} 评级=${st.rank}`);
+    rig.ds.detach();
+  }
+
+  /* —— ③ 真谱面 L2（kick+bass 双轨）：只打鼓的核心节点 → 拆鼓 → 放过 → MISS 复活 → 分母仍是 56 —— */
+  const cfg2 = readLevel(2);
+  if (!cfg2) {
+    skipCase('def04', 'src/data/levels/level2.json 尚不存在（SOUND 名下内容），③ 真谱面复活局跳过');
+  } else {
+    const rig = defRig(MC, JS, DS, cfg2, (c) => PG.build(cfg2, c));
+    const chartIds = new Set(rig.instances.filter((o) => o.judgable !== false).map((o) => o.id));
+    let kickedCore = 0;
+    defPlay(rig, (o) => {
+      if (o.track === 'kick' && o.core === true && kickedCore < 4) {
+        kickedCore += 1;
+        return true;
+      }
+      return false;
+    });
+    const st = rig.ds.stats();
+    const penalized = rig.feed.filter((j) => j.penalizes !== false && j.rule !== 'emptyBeat');
+    const ids = penalized.map((j) => j.obstacleId);
+    eq('def04③: L2 初始谱面可判定障碍 = 56（与既有固化数字一致）', st.baseTotal, 56);
+    eq('def04③: 前置——只打了 4 个核心鼓点（kick 拆空）', kickedCore, 4);
+    ok('def04③: 前置——L2 这一局真的发生了带 id 的复活', rig.reviveEvents > 0 && rig.reviveIds.length > 0, `revive=${rig.reviveEvents} ids=${rig.reviveIds.length}`);
+    eq('def04③: 复活下发 id 全是原件（不铸新身份）', rig.reviveIds.filter((id) => !chartIds.has(id)).length, 0);
+    eq('def04③: 分母/核心分母不受复活影响（§7.3）', `${st.total}/${st.baseTotal}/${st.coreTotal}/${st.baseCoreTotal}`, '56/56/14/14');
+    eq('def04③: 有惩罚判定 id ⊆ 谱面', ids.filter((id) => !chartIds.has(id)).length, 0);
+    eq('def04③: 每个源障碍最多 1 条有惩罚判定', new Set(ids).size, ids.length);
+    eq('def04③: C7 事件流里不出现 -rvN', rvStream(rig), 0);
+    eq('def04③: 队列 id 无重复', rig.probe.dupIds, 0);
+    ok('def04③: 队列长度全程 ≤ 谱面 56（DEF-04 的「事件流条数超过谱面」被杜绝）', rig.probe.maxQueue <= 56, `峰值 ${rig.probe.maxQueue}`);
+    note(`def04③：L2 只打鼓核心 → perfect=${st.perfect} good=${st.good} miss=${st.miss} 恢复原件=${st.revivedIssued} 分母=${st.total} Perfect率=${st.perfectRate.toFixed(3)} 评级=${st.rank} 队列峰值=${rig.probe.maxPending}`);
+    rig.ds.detach();
+  }
+
+  /* —— ④ 重开（R）回基线：② 的那一局连跑 12 次，每次数字完全相同，无跨局残留 —— */
+  {
+    const cfg = synthCfg({ tracks: { kick: { hp: 4 }, bass: { hp: 4 }, synth: { hp: 0 }, bed: { hp: 0, disassemble: false } } });
+    const spec = {
+      kick: [[8, false], [9, true], [10, true], [11, true], [12, true], [12.5, false], [40, false], [42, false], [46, true]],
+      bass: [[14, false], [30, false]],
+      bed: [[13, false], [15, false]]
+    };
+    const rig = defRig(MC, JS, DS, cfg, (c) => defInstances(c, spec));
+    let first = '';
+    let same = true;
+    for (let i = 0; i < 12; i += 1) {
+      rig.clock.stop();
+      rig.clock.start(0);
+      rig.judge.reset();
+      rig.ds.reset();
+      rig.judge.registerObstacles(rig.instances);
+      rig.ds.attach();
+      defPlay(rig, (o) => !(o.track === 'bass' && o.beat === 14));
+      const s = rig.ds.stats();
+      const snap = `${s.total}/${s.baseTotal}/${s.coreTotal}/${s.revivedIssued}/${s.perfect}/${s.miss}/${s.rank}/${s.state}`;
+      if (!first) first = snap;
+      else if (snap !== first) same = false;
+      rig.ds.detach();
+    }
+    eq('def04④: 12 次重开的分母/恢复数/判定数/评级完全相同（T6 不跨局累加）', `${same}/${first}`, 'true/11/11/5/3/9/1/A/RESULT');
+    rig.judge.reset();
+    rig.ds.reset();
+    eq('def04④: reset() 后 revivedIssued 归零', rig.ds.stats().revivedIssued, 0);
+    eq('def04④: reset() 后在场实例回到 11 个原件（退役集与被恢复集都清空，bed 本就不入池）', rig.ds.activeInstances().length, 11);
+    eq('def04④: stats() 仍带 T5 的三个观测字段（只增不删）', ['baseTotal', 'baseCoreTotal', 'revivedIssued'].every((k) => k in rig.ds.stats()), true);
+    note(`def04④：每次重开的快照 = ${first}`);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* case: enc05 — DEF-05 遭遇口径分母：六张出厂谱面「在场事件全打中」必得 S  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 独立重算：判定流里真正出现过的**不同**可判障碍 id。
+ * 一条事件只有在「玩家被给了这一次机会」时才会带着 obstacleId 出现在判定流里
+ * （拆解「停止生成」把它摘队后既不会 PERFECT 也不会超时 MISS），所以这个集合就是
+ * DEF-05「本局实际进场的可判事件」的**与实现不同源**的核对口径；Set 天然按 id 去重，
+ * 同一原件被退役/恢复多少次都只算一次。
+ */
+function facedIdSet(feed) {
+  const s = new Set();
+  for (const j of feed) {
+    if (j.penalizes === false || j.rule === 'emptyBeat' || !j.obstacleId) continue;
+    s.add(String(j.obstacleId));
+  }
+  return s;
+}
+
+const encNum = (v) => (Number.isFinite(v) ? String(v) : 'n/a');
+
+async function caseEnc05() {
+  const MC = await load('src/mocks/MockClock.js', 'enc05');
+  const JS = await load('src/game/systems/JudgeSystem.js', 'enc05');
+  const DS = await load('src/game/systems/DisassembleSystem.js', 'enc05');
+  const PG = await load('src/game/systems/PatternGenerator.js', 'enc05');
+  const SAVE = await load('src/data/save.js', 'enc05');
+  if (!MC || !JS || !DS || !PG) return;
+
+  /* —— ① 六张出厂谱面：把每个真正进场的事件（含寂静段光点）全打中 → 评级必须是 S —— */
+  const seen = LEVEL_IDS.filter((id) => readLevel(id));
+  eq('enc05: 六关 JSON 全部就位（缺关按 T2 记 SKIP，不代造）', seen.length, 6);
+  for (const id of seen) {
+    const cfg = readLevel(id);
+    const rig = defRig(MC, JS, DS, cfg, (c) => PG.build(cfg, c)); // 产品同构接线（含 wireRuntimeResync）
+    defPlay(rig, () => true, { stomp: true });
+    const st = rig.ds.stats();
+    const faced = facedIdSet(rig.feed);
+    const silenced = rig.ev.some((e) => e.name === 'state-change' && e.to === 'SILENCE');
+    const dotsLive = silenced ? st.dots.length : 0;
+    const stomped = st.dots.filter((d) => d.state === 'stomped').length;
+    eq(`enc05 L${id}: 前置——寂静段确实进场过（否则下面的光点断言是空跑的绿）`, silenced, true);
+    eq(`enc05 L${id}: 前置——在场障碍全打中且光点全踩灭（miss/dotMiss 双 0）`, `${st.miss}/${st.dotMiss}`, '0/0');
+    eq(`enc05 L${id}: 评级 S（§7.3 阈值 ≥0.85 且 MISS==0，改用遭遇口径后可达）`, st.rank, 'S');
+    eq(`enc05 L${id}: 遭遇分母 = 判定流不同 id 数 + 进场光点数（独立重算，Q5）`, `${encNum(st.encounterTotal)}/${faced.size + dotsLive}`, `${faced.size + dotsLive}/${faced.size + dotsLive}`);
+    eq(`enc05 L${id}: 遭遇分子 = PERFECT 障碍数 + 踩灭光点数`, `${encNum(st.encounterPerfect)}/${st.perfect + stomped}`, `${st.perfect + stomped}/${st.perfect + stomped}`);
+    ok(`enc05 L${id}: 评级用的是遭遇率（perfect/encounterTotal ≥ 0.85）`, Number.isFinite(st.encounterRate) && st.encounterRate >= 0.85, `encounterRate=${encNum(st.encounterRate)}`);
+    ok(`enc05 L${id}: §7.3 谱面口径未被改写（perfectRate 仍是 P/N，N=固定分母）`, Math.abs(st.perfectRate - st.perfect / st.baseTotal) < 1e-12 && st.total === st.baseTotal, `perfectRate=${st.perfectRate.toFixed(3)} P${st.perfect}/N${st.baseTotal}`);
+    ok(`enc05 L${id}: 谱面口径与遭遇口径是两个不同的数（结算屏要能说清）`, st.encounterTotal <= st.baseTotal + dotsLive, `遭遇 ${encNum(st.encounterTotal)} ≤ 谱面 ${st.baseTotal} + 光点 ${dotsLive}`);
+    eq(`enc05 L${id}: 队列 id 无重复 / 有惩罚判定不超发`, `${rig.probe.dupIds}/${rig.feed.filter((j) => j.penalizes !== false && j.rule !== 'emptyBeat').length <= st.baseTotal}`, '0/true');
+    rig.ds.detach();
+    note(`enc05 L${id} 全遭遇：perfect=${st.perfect} 光点 ${stomped}/${dotsLive} 遭遇 ${encNum(st.encounterTotal)} → 评级率 ${encNum(st.encounterRate)} → 评级 ${st.rank}｜谱面口径 ${st.perfect}/${st.total}=${st.perfectRate.toFixed(3)}`);
+  }
+
+  /* —— ② 反刷分：只打 4 个核心节点、其余（含光点）全放过 → 显著低于全遭遇 —— */
+  for (const id of seen) {
+    const cfg = readLevel(id);
+    const farm = simRun(PG, MC, JS, DS, cfg, { coreHits: 4, otherHits: 0 });
+    const stF = farm.rig.ds.stats();
+    const full = defRig(MC, JS, DS, cfg, (c) => PG.build(cfg, c));
+    defPlay(full, () => true, { stomp: true });
+    const stL = full.ds.stats();
+    full.ds.detach();
+    const rateF = Number.isFinite(stF.encounterRate) ? stF.encounterRate : stF.perfectRate;
+    const rateL = Number.isFinite(stL.encounterRate) ? stL.encounterRate : stL.perfectRate;
+    ok(`enc05 L${id}: 「只打 4 下核心就收工」拿不到 S`, stF.rank !== 'S', `rank=${stF.rank} 遭遇率=${encNum(stF.encounterRate)} perfect=${stF.perfect} miss=${stF.miss}`);
+    ok(`enc05 L${id}: 收工局比全遭遇局低 ≥0.30（不可刷分）`, rateL - rateF >= 0.3, `全遭遇 ${rateL.toFixed(3)} − 收工 ${rateF.toFixed(3)} = ${(rateL - rateF).toFixed(3)}`);
+    ok(`enc05 L${id}: 放过的光点照样进分母（Q5「否则玩家会故意不打光点」）`, !stF.dots.length || stF.dotMiss === 0 || (Number.isFinite(stF.encounterTotal) ? stF.encounterTotal >= facedIdSet(farm.penalized).size + stF.dotMiss : false), `dotMiss=${stF.dotMiss} 遭遇=${encNum(stF.encounterTotal)} 不同判定 id=${facedIdSet(farm.penalized).size}`);
+    note(`enc05 L${id} 收工局：perfect=${stF.perfect} miss=${stF.miss} dotMiss=${stF.dotMiss} 遭遇 ${encNum(stF.encounterTotal)} → ${encNum(stF.encounterRate)} 评级 ${stF.rank}（全遭遇局 ${encNum(stL.encounterRate)} → ${stL.rank}）`);
+    farm.rig.ds.detach();
+  }
+
+  /* —— ③ 退役/恢复不膨胀分母：同一原件被恢复 2 次，仍只算 1 次遭遇 —— */
+  {
+    const cfg = synthCfg({
+      tracks: { kick: { hp: 4 }, bass: { hp: 4 }, synth: { hp: 0 }, bed: { hp: 0, disassemble: false } },
+      sections: [
+        { beat: 0, state: 'INTRO', layers: [] },
+        { beat: 4, state: 'BUILD', layers: ['kick', 'bass', 'synth', 'bed'] },
+        { beat: 8, state: 'PEAK', layers: ['kick', 'bass', 'synth', 'bed'] },
+        { beat: 56, state: 'SILENCE', layers: [] }
+      ]
+    });
+    // 鼓：4 个核心先拆空 → 之后每次 MISS 复活鼓、每个核心再打回拆解态，于是 30/40/60 三个原件被
+    // **反复**退役再恢复（恢复动作数 > 不同原件数）。贝斯 4 个非核心全放过 = 4 发 MISS 当续命泵；
+    // 贝斯永不拆空 → 本局不进 SILENCE → 光点一个都不进场（遭遇分母的另一半必须是 0）。
+    const spec = {
+      kick: [[8, true], [9, true], [10, true], [11, true], [30, true], [40, true], [60, true]],
+      bass: [[14, false], [35, false], [45, false], [55, false]],
+      bed: [[16, false]]
+    };
+    const rig = defRig(MC, JS, DS, cfg, (c) => defInstances(c, spec));
+    defPlay(rig, (o) => o.track === 'kick'); // 鼓全打中、贝斯四个全放过 → 反复「退役 → 恢复 → 再被打中」
+    const st = rig.ds.stats();
+    const faced = facedIdSet(rig.feed);
+    const rawRestored = rig.reviveIds.length;
+    ok('enc05③: 前置——同一批原件被反复退役再恢复（原始恢复动作数 > 不同原件数）', rawRestored > st.revivedIssued && st.revivedIssued > 0, `恢复动作=${rawRestored} 不同原件=${st.revivedIssued}`);
+    ok('enc05③: 前置——本局拆过不止一次（退役/恢复循环真的在跑）', rig.ev.filter((e) => e.name === 'disassemble').length >= 2, `disassemble=${rig.ev.filter((e) => e.name === 'disassemble').length}`);
+    eq('enc05③: 遭遇分母不因复活而膨胀（按 id 去重，= 判定流不同 id 数）', `${encNum(st.encounterTotal)}/${faced.size}`, `${faced.size}/${faced.size}`);
+    ok('enc05③: 遭遇分母 ≤ 固定谱面分母（§7.3「与复活无关」的上界）', Number.isFinite(st.encounterTotal) && st.encounterTotal <= st.baseTotal, `遭遇 ${encNum(st.encounterTotal)} ≤ 谱面 ${st.baseTotal}`);
+    eq('enc05③: 谱面分母始终是 11（复活不改 N）', `${st.total}/${st.baseTotal}`, '11/11');
+    eq('enc05③: 未进 SILENCE → 光点不进分母（只数真正进场过的）', `${encNum(st.encounterDots)}/${rig.ev.some((e) => e.name === 'state-change' && e.to === 'SILENCE')}`, '0/false');
+    note(`enc05③：反复退役/恢复 ${rawRestored} 次（不同原件 ${st.revivedIssued}）→ 遭遇分母 ${encNum(st.encounterTotal)}（谱面 ${st.baseTotal}）perfect=${st.perfect} miss=${st.miss} 评级 ${st.rank}`);
+    rig.ds.detach();
+  }
+
+  /* —— ④ K-05/T6：reset() 后遭遇分母与评级回基线，20 次重开数字完全相同 —— */
+  const cfg4 = readLevel(3);
+  if (cfg4) {
+    const rig = defRig(MC, JS, DS, cfg4, (c) => PG.build(cfg4, c));
+    let first = '';
+    let same = true;
+    for (let i = 0; i < 20; i += 1) {
+      rig.clock.stop();
+      rig.clock.start(0);
+      rig.judge.reset();
+      rig.ds.reset();
+      rig.judge.registerObstacles(rig.instances);
+      rig.ds.attach();
+      defPlay(rig, () => true, { stomp: true });
+      const s = rig.ds.stats();
+      const snap = `${encNum(s.encounterTotal)}/${encNum(s.encounterPerfect)}/${s.perfect}/${s.miss}/${s.rank}/${s.state}`;
+      if (!first) first = snap;
+      else if (snap !== first) same = false;
+      rig.ds.detach();
+    }
+    ok('enc05④: 20 次重开的遭遇分母/分子/评级完全相同（无跨局残留）', same, first);
+    rig.judge.reset();
+    rig.ds.reset();
+    const base = rig.ds.stats();
+    eq('enc05④: reset() 后遭遇分母与光点进场数归零', `${encNum(base.encounterTotal)}/${encNum(base.encounterDots)}`, '0/0');
+    eq('enc05④: reset() 后评级回 C（未打任何事件不得保留 S）', rig.ds.rank(), 'C');
+    eq('enc05④: reset() 后 §7.3 固定分母不变', `${base.total}/${base.baseTotal}`, `${rig.instances.filter((o) => o.judgable !== false).length}/${rig.instances.filter((o) => o.judgable !== false).length}`);
+    note(`enc05④：L3 二十次重开快照 = ${first}`);
+  }
+
+  /* —— ⑤ T5 字段契约 + 两口径解耦（谱面率不到 0.85，也能因遭遇率达阈拿到 S） —— */
+  const cfg5 = readLevel(1);
+  if (cfg5) {
+    const rig = defRig(MC, JS, DS, cfg5, (c) => PG.build(cfg5, c));
+    defPlay(rig, () => true, { stomp: true });
+    const st = rig.ds.stats();
+    eq('enc05⑤: stats() 仍含 T5 冻结字段 total/perfectRate/coreTotal/baseTotal/baseCoreTotal/revivedIssued/dots', ['total', 'perfectRate', 'coreTotal', 'baseTotal', 'baseCoreTotal', 'revivedIssued', 'dots'].every((k) => k in st), true);
+    eq('enc05⑤: 新增字段是加性的且都是数（encounterTotal/Perfect/Rate/Obstacles/Dots + dotsStomped/dotsLive）', ['encounterTotal', 'encounterPerfect', 'encounterRate', 'encounterObstacles', 'encounterDots', 'dotsStomped', 'dotsLive'].every((k) => Number.isFinite(st[k])), true);
+    near('enc05⑤: perfectRate 仍是 §7.3 的 P/N（没被悄悄换成遭遇率）', st.perfectRate, st.perfect / st.total, 1e-12);
+    ok('enc05⑤: 两口径可分离（本局谱面率 < 0.85 而评级率 ≥ 0.85 → 仍得 S）', st.perfectRate < 0.85 && st.encounterRate >= 0.85 && st.rank === 'S', `谱面率=${st.perfectRate.toFixed(3)} 遭遇率=${encNum(st.encounterRate)} 评级=${st.rank}`);
+    note(`enc05⑤：L1 全遭遇局 谱面率 ${st.perfectRate.toFixed(3)}（${st.perfect}/${st.total}）vs 评级率 ${encNum(st.encounterRate)}（${encNum(st.encounterPerfect)}/${encNum(st.encounterTotal)}）→ ${st.rank}`);
+    rig.ds.detach();
+  }
+
+  /* —— ⑥ SAV-01 存档：新字段加性合并，老档缺字段仍能用 —— */
+  if (SAVE) {
+    const { defaultLevelEntry, mergeSave, levelEntry, __resetSaveState } = SAVE;
+    __resetSaveState();
+    const old = mergeSave({ version: 1, levels: { 1: { cleared: true, rank: 'S', perfectRate: 0.93, maxCombo: 30, miss: 0 } } });
+    eq('enc05⑥: 旧档缺 encounterRate → 默认 0（字段级合并不炸）', old.levels['1'].encounterRate, 0);
+    eq('enc05⑥: 旧档已有字段原样保留', `${old.levels['1'].rank}/${old.levels['1'].perfectRate}/${old.levels['1'].miss}`, 'S/0.93/0');
+    const junk = mergeSave({ levels: { 2: { encounterRate: 5 } } });
+    eq('enc05⑥: encounterRate clamp 到 0..1', junk.levels['2'].encounterRate, 1);
+    const keep = mergeSave({ levels: { 3: { encounterRate: 0.8 } } });
+    eq('enc05⑥: 已有 encounterRate 原样读回', keep.levels['3'].encounterRate, 0.8);
+    eq('enc05⑥: defaultLevelEntry 带 encounterRate', defaultLevelEntry().encounterRate, 0);
+    eq('enc05⑥: levelEntry 对未知关卡也给 encounterRate', levelEntry(mergeSave(null), 9).encounterRate, 0);
+    __resetSaveState();
+  } else {
+    skipCase('enc05', 'src/data/save.js 尚不存在，存档加性字段断言跳过');
   }
 }
 
@@ -2406,6 +2876,8 @@ const CASES = [
   ['clock', caseClock],
   ['judge', caseJudge],
   ['misstorm', caseMissStorm],
+  ['def04', caseDef04],
+  ['enc05', caseEnc05],
   ['cr14', caseCr14],
   ['physics', casePhysics],
   ['save', caseSave],
