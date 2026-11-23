@@ -225,3 +225,59 @@ CORE 的处理：`JudgeSystem.registerObstacles` 见 `judgable === false` 即**�
 - `judgable:boolean`（缺省 `true`）与 `reason` / `groupIndex` / `layer` 批准进 C4。**判据唯一化：所有消费方（判定、统计、渲染、回放）只允许以 `judgable` 布尔值分流，禁止用 `track === 'bed'` 或 `type === 'bed'` 作为「是不是玩家对象」的判断条件**——将来新增不可判定层（如 L5 假标记）时消费方无需改动。`track:'bed'` 与 `type:'bed'` 允许并存作为 SOUND 的分类标签。
 - **`pxPerSec` 与 `beatWidthSec` 不批**：几何换算归 WORLD，一律由 `physics.js`（C8 的几何唯一真相）+ 当前视口现算。SOUND 预算视口常量会造成第二套 pxPerBeat，正好摧毁 W-02 要断言的「上下层同 pxPerBeat」。**请 SOUND 在下轮从 `build()` 输出里删掉这两个字段**（不阻塞本轮，CORE 不消费它们）。
 - CORE 的 `registerObstacles` 跳过 `judgable === false` 并计入 `ignoredCount()` 的做法批准为长期行为，`ignoredCount()` 需在 DebugPanel 可见（防「静默丢实例」无人发现）。
+
+---
+
+### CR-10 | 提出：SOUND | 轮次：R1 | 涉及契约：C5 noteEvents / level JSON、C4 ObstacleInstance
+
+需求（四项，全部是**新增可选字段**，不改 C5 已有字段的名字/类型/语义）：
+
+1. `noteEvents.bed: [{b, d, gain}]` —— **音床层**（不参与拆解的铺底碎镲/噪声）。
+   理由：SOUND.md 失败模式 4「拆解后靠轨间相对响度做安静感」要求主声部之外还有一层不打扰主旋律的铺底；
+   PRD §7.4 表头的 density 列（每 4 拍事件数）如果由可判定声部去凑，会直接违反 physics.js 的
+   `AUX.minSameTypeGapBeats = 1.33`（同轨最小间隔）与 `FROZEN.jumpAirBeats + bufferBeats ≈ 1.06` 落地恢复，
+   即「8 分音符密铺的鼓」在本作物理上不可判定。铺底因此单独成层、不进判定队列。
+2. `tracks.bed: { hp: 0, gain, disassemble: false, voice, source: 'synth:bed_lvN', file: null }` —— bed 无 hp 概念，
+   `hp:0` 在这里只表示「不可被拆解」，不表示「不发声」（与 C3 的 DIS-01 语义**不同**，故显式写 `disassemble:false` 区分）。
+3. `tracks[].voice: 'soft'|'saw'|…` —— 音色候选名，指向 `SynthVoices.VOICE_LIBRARY[库][候选]`；缺省用曲风预设的默认候选。
+   审美门 1 人类改名即可换音色，不需要动逻辑。
+4. `style`、`densityNote`、`mapping.{note,platformTiers,speedCuts,speedLevels}` —— 谱面元数据与「音高→平台档位、时值→弹幕速度」
+   换算表（OBS-04）。`platformTiers` 的**长度**决定档位数（值是分界 MIDI 音高，不是像素），`speedCuts/speedLevels` 等长。
+
+理由（为什么必须由 SOUND 持有）：谱面与发声同源，任何一层挪到别人名下都会出现第二份真相。
+影响面：CORE（`contractTest` 若对白名单字段做严格校验需容纳以上键；`DisassembleSystem` 只看 `tracks[kick|bass|synth].hp`，
+  忽略 `tracks.bed`）；WORLD（bed 实例走 `judgable:false + layer:'timeline'`，按 CR-09 判据分流，已实现）。
+兼容性：纯新增。缺字段时行为不变（`noteEvents.bed` 缺省 = 无铺底；`mapping` 缺省 = 2 档平台 + 三档速度默认切点）。
+**SOUND 已按 CR-09 删除项**：`build()` 实例不再带 `pxPerSec` / `beatWidthSec`（几何唯一归 physics.js + 视口）；
+  需要拍长请调新增的 `PatternGenerator.arrivalSpacing(instances, clock) → [{beat, groupIndex, timeSec, widthSec, ids}]`。
+待确认：CORE（字段白名单是否进 contractTest 断言）；WORLD（`arrivalSpacing` 是否满足 W-04/W-05 的列对齐需求）。
+结论：（由被请求方在此填写 APPROVE / REJECT + 一句理由 + 日期）
+
+---
+
+### CR-11 | 提出：SOUND | 轮次：R1 | 涉及契约：C6 TrackMixer、C7 事件流（消费侧）、所有权矩阵 C9
+
+需求（三点，属**签名澄清 + 新增入口文件**，不改 C6 已有方法名）：
+
+1. `tempoCue` 的签名从 C6 文档里的 `TrackMixer.tempoCue()` 改为
+   **`tempoCue(atSec: number, secondAtSec?: number) → boolean`**（`atSec` = 绝对 AudioContext 秒，
+   调用方应传 `clock.getTempoCues()[i].timeSec` 或 `timeAtBeat(cue.beat)`；第二音时刻缺省按 +0.11 拍由时钟求出）。
+   无参调用视为调用方 bug：实现只 `console.warn` 一次并返回 `false`，**不抛**。
+   理由：变速提示必须落在过渡起点那一拍的真实时刻，没有时刻就无法排程；`setTimeout` 补偿方案被 leader 明确否决。
+2. 新增 SOUND 名下入口 `src/audio/SoundEngine.js`（C9 所有权矩阵需补一行）。CORE 只需三处接线：
+   - 主循环每帧 `engine.ensureRunning()`（内含自愈分支 `state==='suspended' && !paused → resume()`）；
+   - 首次 `pointerdown/keydown/touchstart` 调 `engine.unlockOnFirstGesture()`（Safari 自动播放策略）；
+   - 关卡 `engine.loadLevel(cfg, clock)` → `clock.start(atSec)` 后调 `engine.arm()`；拆解/复活调
+     `engine.silence(track)/revive(track)/applyHp(track, hp, hpMax)`（与 C7 的 `hp` 事件一一对应）。
+   `BeatClock.pause()/resume()` 是挂起/恢复的**唯一权威**：engine 只记自己的 `paused` 标志，不抢 `ctx.resume()`。
+3. 发声排程方式：`PatternGenerator.buildSchedule(levelCfg, clock)`（C6 的纯函数侧，TrackMixer 再导出同名）
+   产出 `{track,beat,timeSec,dur,peak,attackSec,releaseSec,pan,hz,gainEnvelope,voice}`；
+   engine 用 `clock.schedule(fn, atSec)` 做**滚动预调度**（每帧只灌未来 0.14s 内的事件），回调签名沿用 C1 的
+   `(atSec, leadSec)`，`leadSec < -0.002` 一律跳过不补发。仓库内不出现 `setTimeout` 型音频调度。
+
+理由：CR-08 第 4 点把「schedule 至多提前 120ms」升格为 C1 显式条款后，发声侧必须自己判 leadSec。
+影响面：CORE（C9 加一行、场景接线三处；`src/main.js` 属 CORE，SOUND 不动手）；WORLD（无）。
+兼容性：`silence/revive/setGain/setVolumes/beatClick` 五个 C6 已冻结方法的名字与语义不变；斜坡常量不变（0.1/0.15s 线性）。
+待确认：CORE（`ensureRunning()` 挂在 `scene.update` 的哪一帧序，以及 K-05 场景生命周期里 `arm()` 的调用点）。
+结论：（由被请求方在此填写 APPROVE / REJECT + 一句理由 + 日期）
+
