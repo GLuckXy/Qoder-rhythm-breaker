@@ -43,7 +43,6 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  ALPHA,
   BACKGROUND_CFG,
   COLOR_HEX_WHITELIST,
   COLORS,
@@ -1771,7 +1770,7 @@ function checkFxIntegration(view, clock) {
 }
 
 /** W-12：假节拍只渲染在下层 + 跨度按拍 + 变速预告读 clock.getTempoCues() */
-function checkGhostLayer(view, clock) {
+function checkGhostLayer(view, _clock) {
   const id = 'render:ghost';
   group(id, 'W-12 假节拍只在下层 + lengthBeats 按拍 + 变速预告读 cues');
   const src = [
@@ -1837,6 +1836,8 @@ function checkGhostLayer(view, clock) {
   const geo4 = tempoCueGeometry(tcView, cues[0], tcView.timeToBeat(cueClock.timeAtBeat(60)));
   near(id, '预告区间 = [beat, targetBeat] 的拍距 × pxPerBeat', geo4.spanPx, geo4.beats * tcView.pxPerBeat, 0.05);
   eq(id, '预告区间拍距 = targetBeat − beat（6 拍过渡）', geo4.beats, 6);
+  const chev4 = g4.ops.filter((o) => o.op === 'strokePoints' && o.close === false && o.style.color === COLORS.system.int && o.pts && o.pts.length === 3);
+  must(id, '变速预告箭头数 = tempoCueChevrons（不多不少 → 没有第二个变速点）', chev4.length === TIMELINE_CFG.tempoCueChevrons, `${chev4.length} 支箭头（预算 ${TIMELINE_CFG.tempoCueChevrons}）`);
   must(id, '预告只画一次 chevron（无自算的第二个变速点）', g4.ops.filter((o) => o.style.color === COLORS.system.int && o.op === 'line').length <= TIMELINE_CFG.tempoCueChevrons + 4, `${g4.ops.length} 条 op / ${TIMELINE_CFG.tempoCueChevrons} 个箭头`);
   const tlEmpty = new Timeline({ ghostBeats: [] });
   const g5 = new RecordingGraphics('noTempo');

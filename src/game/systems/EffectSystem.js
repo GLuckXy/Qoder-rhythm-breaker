@@ -434,7 +434,9 @@ export class EffectSystem {
   }
 
   /** 事件记录：**三要素共用同一个 startBeat**（这是 DIS-04「同帧」的实现点，不是三个独立计时器） */
-  _record(kind, ev, view, nowSec, nowBeat) {
+  // _nowBeat 故意不用：startBeat 必须由 startSec 换算（ev.atSec 可能是延迟/补发时刻，≠ 本帧拍位），
+  // 用本帧拍位当 startBeat 会让三要素在同一条记录上拿到不同的起点 → 「同帧」就散了。
+  _record(kind, ev, view, nowSec, _nowBeat) {
     const startSec = typeof ev.atSec === 'number' ? ev.atSec : nowSec;
     const key = `${kind}:${ev.track || '-'}:${r2(startSec)}`;
     const hit = this._open.get(key);

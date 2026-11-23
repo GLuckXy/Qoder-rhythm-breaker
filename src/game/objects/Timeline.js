@@ -520,8 +520,16 @@ function drawTempoRamp(g, view, x0, x1, cue, nowBeat) {
     const t = (i + 0.5) / n;
     const cx = x0 + span * t;
     const w = s * (0.6 + 0.9 * t);
-    g.lineBetween(cx - w * 0.5, y - w, cx + w * 0.5, y);
-    g.lineBetween(cx + w * 0.5, y, cx - w * 0.5, y + w);
+    // 一个箭头 = 一条折线（3 点 2 段）→ 1 条 draw op，而不是 2 条 line op。
+    // 像素与逐段画完全相同（两段共用中点），只是不再把绘制预算翻倍花在同一支箭头上。
+    g.strokePoints(
+      [
+        { x: cx - w * 0.5, y: y - w },
+        { x: cx + w * 0.5, y },
+        { x: cx - w * 0.5, y: y + w }
+      ],
+      false
+    );
   }
   g.lineStyle(Math.max(1, view.designScale * 2), DERIVED.barLine.int, 0.9);
   g.lineBetween(x1, r.y + r.h * 0.08, x1, r.y + r.h * 0.92);
