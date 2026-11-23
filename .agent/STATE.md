@@ -143,6 +143,43 @@ SOUND : 跑 `node tools/checkLevel.mjs --all` + `node tools/audioAssert.mjs --al
         （chiptune，bed 非空）+ S-08 Sfx；`?selftest=audio` 浏览器链路要等 CORE 在 main.js 接 SoundEngine（CR-11）
 ```
 
+## CORE · R4 集成收尾轮（selftest 端点 + 断链修复 + K-18 README）
+
+门禁收工：`contractTest` **601/601 PASS（未减条、未放松）**；`npx eslint src tools` CORE 名下 0 error 0 warning
+（`tools/contractTest.mjs:1654` 的未用参数 warning **接手时已不存在**，全仓扫该文件 0 问题）；
+`npx vite --port 5199` + curl 实测 `/`、`/src/main.js`、`/src/game/scenes/LevelRuntime.js` 全 200，无 500，
+index.html 的 `#game-root/#ui-root/#debug-root` 三挂载点齐全。**`npm run build` 红，唯一报错点
+`src/game/objects/Timeline.js (529:29) Expression expected`（WORLD 名下、本轮正在编辑；收工快照如此）。**
+
+修掉两处**真实断链**（都在 CORE 名下 `src/game/scenes/LevelRuntime.js`，全文见 `.agent/rounds/R4-CORE.md`）：
+
+1. **CR-12 的唯一音效路由 `engine.playForEvent(ev)` 在接轮前于全仓 `src/` 里 0 个调用点**（只在
+   `SoundEngine.js:379` 定义）→ Sfx 八个音效一个都不响。现接在四个出口：`LevelRuntime.js:156`（judge）
+   `:173`（hp）`:186`（revive 直发）`:193`（state）。**关键**：C2 的 judgment 自带 `type`（障碍种类），
+   而 `Sfx.sfxForEvent` 读 `ev.kind || ev.type`（`Sfx.js:150`），原样转发会命中 `default → null` 一声不出，
+   所以必须 `{...j, kind:'judge'}`；空拍静音与 `crack` 的 `hp===0` 条件都留在 SOUND 侧，CORE 零映射。
+   `tempo` 不接（`SoundEngine.js:216` 的 `_pumpList(this.cues,…)` 已自发，再接就是双份）。
+2. **`extra.action` 从未被填**：`WorldLayer.js:160 applyAction(extra.action,…)` 永远收 `undefined` →
+   判定与音频照跑但**角色一动不动**。现于 `LevelRuntime.js:265` 在取样后写 `this._extra.action={kind,atSec}`。
+
+核实为**原本就通**的环节（免重复追查）：EffectSystem 由 `WorldLayer.js:79` 内部实例化，CORE 只需喂
+`sync` 第 2 参（`disassembledTracks/hpByTrack/revivedIds` 已在 `LevelRuntime.js:144-150` 喂齐）；
+暂停唯一权威是 `clock.pause()/resume()`（`LevelRuntime.js:287-288`，界面「继续」也只回走 `rt.togglePause()`）；
+`shutdown()` 的 `_offs` 单表释放在 contractTest 的 20 次重开基线里已证。
+
+selftest 两端点：`?selftest=audio` 前任已接对（`audioAssert.run({levels})` 核实不碰 `node:fs`/`process.stdout`）；
+`?selftest=render` **本轮重写**为 WORLD 声明的 `world-selftest/v1` 负载（`src/main.js:213`），
+`world`/`timeline` 喂**同一批 `ds.activeInstances()` 与同一个 `rt.view`**，否则 `runSelftest` 的逐实例比对走 SKIP；
+`pixels[]` 留空（readPixels 归 WORLD，CORE 不猜灰度值）。
+
+新增 `README.md`（K-18）：双时钟对照表 + 「一 JSON 四消费者」数据流 + 操作全表 + 四道 `check:*` 语义 +
+**已知限制 9 条如实列**（含无人耳验收、峰值 1.084、纸面参数、Safari 未测、build 对 Timeline.js 的新耦合）。
+
+CORE→WORLD（请转派，CORE 无权改）：`src/game/objects/Timeline.js:529` 语法错卡住 `npm run build`
+——`world-selftest/v1` 的 schema 要求负载带 `timeline` 快照，该文件已进浏览器图；
+另 `EffectSystem.js:437` 的 `nowBeat` 未用参数 warning、`tools/screenshotCheck.mjs:1840` 同批 parse error。
+CORE→leader：界面按钮的 `ui` 音效（`SFX_TRIGGERS` 标「调用点直发」）尚未接线，属打磨不属断链。
+
 ## Decisions
 ```
 见 .agent/PLAN.md 的 L-01…L-10（leader 代人类拍板，agent 不得分叉）

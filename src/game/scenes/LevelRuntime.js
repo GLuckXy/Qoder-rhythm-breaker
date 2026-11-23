@@ -151,11 +151,26 @@ export class LevelRuntime {
     this._judgment = j;
     this._judgmentAt = this.clock.now();
     if (this.onLog && j && j.rule !== 'emptyBeat') this.onLog(`${j.grade}${j.actionMatch === false ? '（动作不符）' : ''} ${j.deltaMs >= 0 ? '+' : ''}${j.deltaMs}ms`);
+    // CR-12：判定 → 音效的唯一路由。C2 的 judgment 自带 type（障碍种类）会串进 sfxForEvent 的 ev.type，
+    // 所以在这里显式打 kind:'judge'（kind 优先于 type）；penalizes===false 的空拍由 SOUND 侧拦住，不在这判。
+    this._sfx(j ? { ...j, kind: 'judge' } : null);
     this.ds.onJudgment(j); // ★ hp 的唯一写入口
+  }
+
+  /** CR-12 唯一发声出口：CORE 不持有 grade → 音效名 的映射，只做事件打标与转发。 */
+  _sfx(ev) {
+    if (!ev || !this.engine || typeof this.engine.playForEvent !== 'function') return false;
+    try {
+      return this.engine.playForEvent(ev);
+    } catch (err) {
+      console.error('[LevelRuntime] playForEvent 抛错（已隔离，不影响判定）：', err);
+      return false;
+    }
   }
 
   _onHpChange(track, hp) {
     if (this.engine && typeof this.engine.applyHp === 'function') this.engine.applyHp(track, hp, this.ds.hpMax(track));
+    this._sfx({ kind: 'hp', track, hp }); // hp 归零 → 'crack'（Sfx.SFX_TRIGGERS 的 C7 口径），途中扣血不出声
   }
 
   _onDisassemble(p) {
@@ -167,12 +182,15 @@ export class LevelRuntime {
 
   _onRevive(p) {
     if (this.engine) this.engine.revive(p.track); // 0.15s 线性斜坡淡入
+    // SFX_TRIGGERS 里 'revive' 标注「调用点直发」（C7 无此事件：hp 单调不增），不是 grade 映射，不违反 CR-12。
+    if (this.engine && typeof this.engine.playSfx === 'function') this.engine.playSfx('revive');
     this._extra.revivedIds = (this._extra.revivedIds || []).concat(p.ids || []);
     this.judge.registerObstacles(this.ds.activeInstances()); // 当前拍之后恢复生成（不补发历史）
     this._log(`复活 ${p.track} → hp ${p.hp}，新下发 ${p.ids.length} 个实例`);
   }
 
   _onStateChange(p) {
+    this._sfx({ kind: 'state', to: p.to }); // → RESULT 时 Sfx 出 'finish'
     if (p.to === 'SILENCE' && this.engine) this.engine.beatClick(true); // 寂静段逐拍光点音
     if (p.to === 'RESULT') this._finish();
     if (p.from === 'DISASSEMBLED' && p.to === 'PEAK' && p.reason === 'revive') {
@@ -242,6 +260,9 @@ export class LevelRuntime {
   onAction(action) {
     if (!this.running || this.paused || (action !== 'jump' && action !== 'dash')) return null;
     const atSec = this.clock.now();
+    // W-03 契约的 extra.action：{kind:'jump'|'dash', atSec}。WorldLayer.sync 第 2 参消费它驱动角色，
+    // 不填这一项 = 判定/音频照跑但角色原地不动（R3 的断链，见 rounds/R4-CORE.md）。
+    this._extra.action = { kind: action, atSec };
     const state = this.ds.state();
     if (state === 'SILENCE') {
       const dot = this.ds.stompDot({ atSec });
