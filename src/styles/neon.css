@@ -1,0 +1,7 @@
+:root {
+  /* Owner: WORLD. leader 的 D0 占位；WORLD 在 R1 用 src/data/theme.js 的值全量重写本文件。 */
+  --rb-bg: #0a0e1a;
+}
+html, body { margin: 0; padding: 0; background: #0a0e1a; overflow: hidden; }
+#game-root, #ui-root, #debug-root { position: absolute; inset: 0; }
+#ui-root, #debug-root { pointer-events: none; }
