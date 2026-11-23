@@ -17,7 +17,7 @@
 //   A9 静音 0.1s / 复活 0.15s 的线性斜坡（且全程无 `gain.value =` 瞬时写入）
 //   A10 节拍器计划（倒计时 4 拍 + 寂静段逐拍）与变速提示双音间隔
 
-export const AUDIO_ASSERT_VERSION = 'R1';
+export const AUDIO_ASSERT_VERSION = 'R3';
 
 /* ───────────────────────────────────────────────────────────────
  * 假 AudioContext：只记录 automation，不出声。用于结构断言。
@@ -242,7 +242,7 @@ export function auditRamps(fakeCtx, label = '') {
  */
 export async function run(opts = {}) {
   const levels = Array.isArray(opts.levels) ? opts.levels.filter(Boolean) : [];
-  const detail = { version: AUDIO_ASSERT_VERSION, levels: [], errors: [], warnings: [], notes: [], library: null, ramps: null };
+  const detail = { version: AUDIO_ASSERT_VERSION, levels: [], errors: [], warnings: [], notes: [], library: null, ramps: null, replay: null };
   const finish = (result) => ({ result, checked: detail.levels.length, detail });
   if (!levels.length) {
     detail.notes.push('没有可断言的谱面：src/data/levels/levelN.json 缺失或参数没给（SKIP，不算失败）');
@@ -259,6 +259,13 @@ export async function run(opts = {}) {
   if (Math.abs(RAMP.reviveSec - 0.15) > 1e-9) detail.errors.push(`复活斜坡 ${RAMP.reviveSec}s ≠ 0.15s`);
   const { auditMetronome, METRONOME_SHAPE } = await import('../src/audio/Metronome.js');
   detail.ramps = { silenceSec: RAMP.silenceSec, reviveSec: RAMP.reviveSec, minAttackSec: RAMP.minAttackSec, cue: METRONOME_SHAPE.cue };
+
+  // L-2 回放重组自检（人造事件流，与关卡无关，一次就够）
+  const { replaySelfTest } = await import('../src/audio/ReplayAssembler.js');
+  const repSelf = replaySelfTest();
+  detail.replay = { errors: repSelf.errors.length, warnings: repSelf.warnings.length, stats: repSelf.stats };
+  detail.errors.push(...repSelf.errors.map((e) => `回放自检：${e}`));
+  detail.warnings.push(...repSelf.warnings.map((e) => `回放自检：${e}`));
 
   for (const cfg of levels) {
     const name = `L${cfg.id ?? '?'} ${cfg.title || ''}`.trim();
@@ -295,6 +302,17 @@ export async function run(opts = {}) {
       row.errors.push(...sim.errors);
       row.warnings.push(...sim.warnings);
     }
+    // A11 回放重组（S-18）
+    const rep = await replayAudit(cfg, clock);
+    row.replay = rep.stats;
+    row.errors.push(...rep.errors);
+    row.warnings.push(...rep.warnings);
+
+    // S-17 红点（leader 裁决：维持峰值口径不改断言，>1.0 只 warn 不 error）
+    if (Number.isFinite(row.peakSum) && row.peakSum > 1.0) {
+      row.warnings.push(`混音同时峰值 ${row.peakSum} > 1.0（真 ctx 上有削峰风险；响度口径仍按峰值判据，未改断言）`);
+    }
+
     detail.errors.push(...row.errors.map((e) => `${name}: ${e}`));
     detail.warnings.push(...row.warnings.map((e) => `${name}: ${e}`));
     detail.levels.push(row);
@@ -306,10 +324,13 @@ export async function run(opts = {}) {
 async function defaultClock(cfg) {
   try {
     const { MockClock } = await import('../src/mocks/MockClock.js');
-    const clock = new MockClock({ t: 0 });
+    // 时间源故意比原点早 0.1s 起步：真实浏览器里 `BeatClock.start()` 缺省就是 `now()+0.1`，
+    // 关卡原点永远在「未来的 0.1s 之后」。R3 起 MockClock.start(atSec) 会把时间源同步到 atSec，
+    // 若显式传 1.25，仿真第一格就直接落在原点上，恰好到期在原点的那个倒计时点击会晚 25ms 派发。
+    const clock = new MockClock({ t: 1.15 });
     clock.init({ bpm: cfg.bpm, sections: cfg.sections, tempoChanges: cfg.tempoChanges, introBeats: cfg.introBeats, lengthBeats: cfg.lengthBeats });
-    clock.start(1.25);
-    clock.label = 'src/mocks/MockClock.js（CORE 真实现，originSec=1.25）';
+    clock.start(); // 原点 = 1.15 + 0.1 = 1.25（非零原点这个测试意图保持不变）
+    clock.label = 'src/mocks/MockClock.js（CORE 真实现，originSec=1.25，时间源 1.15 起步）';
     return clock;
   } catch (err) {
     const { isoClock } = await import('../src/game/systems/PatternGenerator.js');
@@ -346,9 +367,12 @@ async function simulateLevel(cfg, schedule, met) {
       return ok;
     };
     engine.loadLevel(cfg, clock);
-    if (clock.start) clock.start(1.25);
+    // 不再重复 clock.start()：R3 起 MockClock.start(atSec) 会把时间源同步到原点，
+    // 重复一次就把 defaultClock 特意留出的 0.1s 提前量吃掉了（第一个倒计时点击会晚 25ms 派发）。
     const endSec = clock.timeAtBeat(cfg.lengthBeats) + 0.4;
     let guard = 0;
+    ref.t = clock.now();
+    engine.update(0.025); // 原点前的那次预调度（真实浏览器里 start 之后必然先 pump 一轮）
     while (clock.now() < endSec && guard++ < 20000) {
       if (clock.advanceBy) clock.advanceBy(0.025);
       else break;
@@ -547,6 +571,156 @@ async function simulateLevel(cfg, schedule, met) {
 }
 
 /* ───────────────────────────────────────────────────────────────
+ * A11 回放重组（S-18，范围严格按 L-06：只做 2× 分轨重组）
+ *   ① 分轨边界与该声部 `hp` 事件时刻严格一致（按 hp 事件顺序，不多切也不漏切）；
+ *   ② 倍速只缩放 t，**不改变事件顺序**；
+ *   ③ 人造事件流能复现「拆解瞬间安静」；
+ *   ④ CR-08 批复：`penalizes === false` 不算 MISS；bed（`judgable:false`）不进 Perfect 率分母；
+ *   ⑤ C3：复活只从当前拍之后恢复，不补发历史。
+ * 事件字段名照 JudgeSystem.EventLog 的实际产出写，不照想象。
+ * ─────────────────────────────────────────────────────────────── */
+
+/** 一路打通的剧本 → C7 事件流（judge / hp / input / state 四类）。 */
+function canonicalEvents(instances, levelCfg) {
+  const hpStart = {};
+  const tracks = (levelCfg && levelCfg.tracks) || {};
+  for (const k of Object.keys(tracks)) if (Number.isFinite(tracks[k].hp) && tracks[k].hp > 0) hpStart[k] = tracks[k].hp;
+  const hpNow = { ...hpStart };
+  const events = [];
+  let emptyBeats = 0;
+  instances.forEach((it, i) => {
+    if (it.judgable === false) return; // bed 不产判定事件（C5 字段规则）
+    const grade = i % 17 === 5 ? 'MISS' : i % 7 === 3 ? 'GOOD' : 'PERFECT';
+    events.push({ t: it.timeSec, kind: 'judge', grade, id: it.id, deltaMs: grade === 'PERFECT' ? 12 : 88, rule: 'window' });
+    if (grade === 'PERFECT' && it.core && it.track in hpNow && hpNow[it.track] > 0) {
+      hpNow[it.track] -= 1;
+      events.push({ t: it.timeSec, kind: 'hp', track: it.track, hp: hpNow[it.track] });
+    }
+    if (i % 23 === 11) { // 空拍伪 MISS：不算 MISS、不进任何分母
+      emptyBeats += 1;
+      events.push({ t: Number((it.timeSec + 0.01).toFixed(3)), kind: 'judge', grade: 'MISS', id: null, deltaMs: 0, rule: 'emptyBeat', penalizes: false });
+    }
+  });
+  const zeros = Object.keys(hpStart);
+  if (zeros.length && zeros.every((k) => hpNow[k] <= 0)) {
+    const last = events.filter((e) => e.kind === 'hp' && e.hp === 0).reduce((a, e) => Math.max(a, e.t), 0);
+    events.push({ t: last, kind: 'state', from: 'PEAK', to: 'DISASSEMBLED' });
+  }
+  events.push({ t: events.length ? Math.max(0, events[0].t - 0.02) : 0, kind: 'input', key: 'jump', hasTarget: true });
+  events.sort((a, b) => a.t - b.t);
+  return { events, emptyBeats, hpStart, hpNow };
+}
+
+/** 独立重算一遍（不复用被测代码的判据），任何分歧都是红点。 */
+function independentCounts(events) {
+  const scoring = events.filter((e) => e.kind === 'judge' && e.penalizes !== false && e.rule !== 'emptyBeat');
+  const c = { PERFECT: 0, GOOD: 0, MISS: 0 };
+  let combo = 0;
+  let maxCombo = 0;
+  for (const e of scoring) {
+    c[e.grade] += 1;
+    if (e.grade === 'MISS') combo = 0;
+    else { combo += 1; maxCombo = Math.max(maxCombo, combo); }
+  }
+  return { c, maxCombo, scoring: scoring.length, empty: events.length - scoring.length };
+}
+
+async function replayAudit(cfg, clock) {
+  const errors = [];
+  const warnings = [];
+  const { build } = await import('../src/game/systems/PatternGenerator.js');
+  const { assembleReplay, replayBoundaryErrors, scaleEvents, syntheticSilenceEvents, judgableTotal, coreTotal } = await import('../src/audio/ReplayAssembler.js');
+  const instances = build(cfg, clock);
+  const { events, emptyBeats, hpStart } = canonicalEvents(instances, cfg);
+  if (!instances.length) return { errors: ['回放：障碍表为空'], warnings, stats: null };
+  if (!events.some((e) => e.kind === 'hp')) warnings.push('回放：剧本里没有任何 hp 事件（本关没有核心节点打通到 0？），区间表退化为单段');
+
+  const one = assembleReplay({ events, instances, levelCfg: cfg, clock, speed: 1 });
+  errors.push(...replayBoundaryErrors(one));
+
+  // ④ 分母固定 + bed 不进分母 + 空拍不算 MISS
+  const judgable = instances.filter((i) => i.judgable !== false).length;
+  const bed = instances.length - judgable;
+  if (one.stats.denominator !== judgable) errors.push(`回放：Perfect 率分母 ${one.stats.denominator} ≠ 可判定障碍数 ${judgable}`);
+  if (bed > 0 && one.stats.denominator >= instances.length) errors.push(`回放：${bed} 个 bed 实例混进了 Perfect 率分母`);
+  const ind = independentCounts(events);
+  if (ind.c.MISS !== one.stats.counts.MISS) errors.push(`回放：MISS 计数 ${one.stats.counts.MISS} ≠ 独立重算 ${ind.c.MISS}（penalizes:false 被当成 MISS？）`);
+  if (one.stats.emptyBeats !== emptyBeats) errors.push(`回放：空拍伪 MISS 计数 ${one.stats.emptyBeats} ≠ 剧本 ${emptyBeats}`);
+  if (Math.abs(one.stats.perfectRate - ind.c.PERFECT / judgable) > 1e-9) errors.push(`回放：perfectRate ${one.stats.perfectRate.toFixed(4)} ≠ PERFECT/固定分母`);
+  if (one.stats.maxCombo !== ind.maxCombo) errors.push(`回放：maxCombo ${one.stats.maxCombo} ≠ 独立重算 ${ind.maxCombo}`);
+  const coreIds = new Set(instances.filter((i) => i.core && i.judgable !== false).map((i) => i.id));
+  const coreHit = new Set(events.filter((e) => e.kind === 'judge' && e.grade === 'PERFECT' && coreIds.has(e.id)).map((e) => e.id));
+  if (coreIds.size && Math.abs(one.stats.coreHitRate - coreHit.size / coreIds.size) > 1e-9) errors.push(`回放：核心命中率 ${one.stats.coreHitRate.toFixed(4)} ≠ ${coreHit.size}/${coreIds.size}`);
+  if (one.stats.denominatorSource !== 'instances') errors.push(`回放：分母来源应为 instances，实得 ${one.stats.denominatorSource}`);
+  if (judgableTotal(instances) !== judgable || coreTotal(instances) !== coreIds.size) errors.push('回放：judgableTotal/coreTotal 与实例表不一致');
+
+  // ② 倍速只缩放 t，不动顺序
+  const two = assembleReplay({ events, instances, levelCfg: cfg, clock, speed: 2 });
+  if (two.events.length !== one.events.length) errors.push('回放：倍速改变了事件数量');
+  const orderOf = (list) => list.map((e) => `${e.kind}:${e.id ?? e.track ?? ''}:${e.grade ?? e.to ?? e.key ?? ''}`).join('|');
+  if (orderOf(two.events) !== orderOf(one.events)) errors.push('回放：2× 改变了事件顺序（L-06 禁止）');
+  if (orderOf(scaleEvents(events, 2)) !== orderOf(events)) errors.push('回放：scaleEvents 破坏了顺序');
+  const nz = one.events.filter((e) => Number(e.t) !== 0);
+  const nz2 = two.events.filter((e) => Number(e.t) !== 0);
+  if (nz.length === nz2.length && !nz.every((e, i) => Math.abs(nz2[i].t * 2 - e.t) < 1e-9)) errors.push('回放：2× 没有把每个 t 精确缩到 1/2');
+  if (two.stems.length !== one.stems.length) errors.push('回放：2× 的声部数变了');
+  if (two.stems.some((s, i) => s.segments.length !== one.stems[i].segments.length)) errors.push('回放：2× 的区间段数变了（倍速只该缩放时刻）');
+  if (Number.isFinite(one.stats.disassembledAtSec) && Math.abs(two.stats.disassembledAtSec * 2 - one.stats.disassembledAtSec) > 1e-9) {
+    errors.push('回放：拆解时刻没有随倍速等比缩放');
+  }
+
+  // ③ 拆解瞬间安静
+  const keys = Object.keys(hpStart);
+  if (keys.length) {
+    const atSec = clock.timeAtBeat(Math.floor((cfg.lengthBeats || 64) * 0.6));
+    const silEvents = [...syntheticSilenceEvents({ trackHps: hpStart, atSec }), ...events.filter((e) => e.kind === 'judge')];
+    silEvents.sort((a, b) => a.t - b.t);
+    const sil = assembleReplay({ events: silEvents, instances, levelCfg: cfg, clock, speed: 1 });
+    errors.push(...replayBoundaryErrors(sil));
+    const sounding = sil.stems.reduce((a, s) => a + s.segments.filter((seg) => seg.closeSec > atSec + 1e-9 && seg.openSec < atSec + 1e-9).length, 0);
+    if (sounding) errors.push(`回放：拆解瞬间 ${atSec}s 之后仍有 ${sounding} 段声部在响（寂静没做到）`);
+    if (Math.abs(sil.stats.disassembledAtSec - atSec) > 1e-9) errors.push(`回放：拆解时刻应为 ${atSec}，实得 ${sil.stats.disassembledAtSec}`);
+    if (!(sil.stats.silenceSecAfterDisassemble > 0)) errors.push('回放：拆解后没有剩余静默时长');
+
+    // ⑤ 复活不补发历史
+    const revEv = { t: atSec + 0.5, kind: 'hp', track: keys[0], hp: 1 };
+    const revEvents = silEvents.concat([revEv]).sort((a, b) => a.t - b.t);
+    const rev = assembleReplay({ events: revEvents, instances, levelCfg: cfg, clock, speed: 1 });
+    errors.push(...replayBoundaryErrors(rev));
+    const stem = rev.stems.find((s) => s.track === keys[0]);
+    const revived = stem.segments.filter((seg) => seg.kind === 'revive');
+    if (revived.length !== 1) errors.push(`回放：声部 ${keys[0]} 应恰有 1 段复活区间，实得 ${revived.length}`);
+    else if (revived[0].catchUp !== false || revived[0].openSec !== revEv.t) {
+      errors.push(`回放：复活区间补发了历史或边界不在 hp 事件时刻（openSec=${revived[0] && revived[0].openSec} vs hp=${revEv.t}）`);
+    }
+    if (rev.stats.revives !== 1) errors.push(`回放：复活计数应为 1，实得 ${rev.stats.revives}`);
+  }
+
+  if (one.warnings.length) warnings.push(...one.warnings);
+  const segTotal = one.stems.reduce((a, s) => a + s.segments.length, 0);
+  return {
+    errors,
+    warnings,
+    stats: {
+      denominator: one.stats.denominator,
+      judgable,
+      bed,
+      counts: one.stats.counts,
+      emptyBeats: one.stats.emptyBeats,
+      perfectRate: Number(one.stats.perfectRate.toFixed(4)),
+      coreHitRate: Number(one.stats.coreHitRate.toFixed(4)),
+      maxCombo: one.stats.maxCombo,
+      stems: one.stems.length,
+      segments: segTotal,
+      revives: one.stats.revives,
+      disassembledAtSec: one.stats.disassembledAtSec,
+      totalSec: one.stats.totalSec,
+      scaledTotalSec2x: two.stats.scaledTotalSec
+    }
+  };
+}
+
+/* ───────────────────────────────────────────────────────────────
  * CLI
  * ─────────────────────────────────────────────────────────────── */
 
@@ -597,6 +771,7 @@ async function main() {
         line(`  仿真：响 ${r.sim.played} 次（应 ${r.events}）｜节拍器 ${r.sim.clicks}｜迟到跳过 ${r.sim.lateSkipped}｜长阻塞：队列 ${r.sim.stallQueued} 项全部跳过 ${r.sim.stallLateSkipped}、补发 ${r.sim.stallPlayed}，恢复后 ${r.sim.resumedPlayed}+${r.sim.resumedClicks}/${r.sim.resumedWant}`);
         line(`  斜坡：静音 ${r.sim.silenceRamps} 条 / 复活 ${r.sim.reviveRamps} 条｜混音 1ms 最大步长 ${r.sim.mixMaxStep}（限 0.05）｜节点 ${r.sim.mixNodes} 个 gain`);
       }
+      if (r.replay) line(`  回放 分母=${r.replay.denominator}（可判定 ${r.replay.judgable}／bed ${r.replay.bed}）判定 ${JSON.stringify(r.replay.counts)} 空拍 ${r.replay.emptyBeats}｜Perfect率 ${r.replay.perfectRate} 核心命中 ${r.replay.coreHitRate} maxCombo ${r.replay.maxCombo}｜声部 ${r.replay.stems} 段 ${r.replay.segments} 拆解 ${r.replay.disassembledAtSec}s｜2× 时长 ${r.replay.scaledTotalSec2x}s`);
       for (const e of r.errors) line(`    ✗ ${e}`);
       for (const w of r.warnings.slice(0, 8)) line(`    ⚠ ${w}`);
     }
@@ -606,7 +781,8 @@ async function main() {
   const warns = d.warnings;
   const loud = d.levels.map((r) => r.maxPairDb ?? 0);
   const step = d.levels.map((r) => (r.sim && r.sim.mixMaxStep != null ? r.sim.mixMaxStep : 0));
-  const detail = `${d.levels.length}关 事件${d.levels.reduce((a, r) => a + r.events, 0)} 轨间差max=${loud.length ? Math.max(...loud).toFixed(2) : '—'}dB(≤3) 混音阶跃max=${step.length ? Math.max(...step).toFixed(3) : '—'}(≤0.05) 音符包络${Math.max(0, ...d.levels.map((r) => (r.sim && r.sim.noteNodes ? r.sim.noteNodes : 0)))}条`
+  const repSeg = d.levels.map((r) => (r.replay ? r.replay.segments : 0));
+  const detail = `${d.levels.length}关 事件${d.levels.reduce((a, r) => a + r.events, 0)} 轨间差max=${loud.length ? Math.max(...loud).toFixed(2) : '—'}dB(≤3) 混音阶跃max=${step.length ? Math.max(...step).toFixed(3) : '—'}(≤0.05) 音符包络${Math.max(0, ...d.levels.map((r) => (r.sim && r.sim.noteNodes ? r.sim.noteNodes : 0)))}条 回放段${repSeg.reduce((a, b) => a + b, 0)} 峰值warn${d.warnings.filter((w) => w.includes('同时峰值')).length}`
   const result = !d.levels.length ? 'SKIP' : errs.length ? 'FAIL' : 'PASS';
   if (result === 'SKIP') line(`RESULT: SKIP 没有可断言的谱面（src/data/levels/levelN.json 缺失）`);
   else line(`RESULT: ${result} ${detail} 错误${errs.length} 警告${warns.length}`);

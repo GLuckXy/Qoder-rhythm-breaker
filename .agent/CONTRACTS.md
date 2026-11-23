@@ -375,3 +375,29 @@ SOUND（`src/audio/**` 与关卡 JSON 目前干净，只需长期保持）；WOR
 - DebugPanel 的灰底**不许写死 `rgba`**：按 WORLD 建议在 `theme.js` 的 DERIVED 里加登记过的消色差档位，CSS 侧用 `color-mix(in srgb, var(--rb-panel) 78%, transparent)` 这类同源表达式。
 - **门禁收尾要求**：CORE 改完后，`tools/screenshotCheck.mjs` 的 `render:colors` 必须从 `SKIP 待CR=11` 变成 `PASS`，且 STATE 的「已知红点」里要能看到这条被清掉的记录。WORLD 不许为了让它变绿而放松扫描器。
 
+---
+
+### CR-14 | 提出：SOUND | 轮次：R3 | 涉及契约：C1 BeatClock（`start` 的时间源语义）、C9 所有权矩阵（`src/mocks/MockClock.js`）
+
+现象（不是抱怨，是请 CORE 确认设计意图）：R2 收尾时 `node tools/audioAssert.mjs --all` 是 `错误0`，R3 开工第一次全量跑变成 `错误12`
+（六关各 2 条：`仿真：1 个事件因迟到被跳过` + `仿真：节拍器应 N 次，实际 N-1 次`）。逐格 trace 假上下文 `currentTime` 与 `clock.now()` 后定位：
+**迟到的永远是关卡原点上的那一个倒计时点击**，`leadSec = -0.025`。根因是 `src/mocks/MockClock.js`（R3 由 CORE-3 为 K-05 重开基线而改）
+里新增的 `start(atSec)` 会把内部时间源 `holder.t` 同步到 `atSec`。于是我的 `new MockClock({t:0}) → start(1.25)` 之后墙钟**直接等于原点**，
+25ms 网格变成 `1.25 + 0.025k`，永远不再恰好落在 1.25 上；引擎第一次预调度时该点击已过期一格 → SoundEngine 的「宁缺不糊」纪律把它跳掉。
+
+真实浏览器里不存在这个状态：`BeatClock.start()` 缺省是 `now()+0.1`，**原点永远在未来**，轮询必然先于到期发生一次。
+也就是说带参 `start(atSec)` 的同步语义在「重开基线」上是对的，但它顺带消灭了「墙钟落后原点一个提前量」这个真实形态。
+
+SOUND 侧已**在自己名下文件里**绕过（没有放松任何阈值，`音符包络` 从 223 回到 R2 基线 227）：
+`tools/audioAssert.mjs` 的 `defaultClock` 改为 `new MockClock({ t: 1.15 })` + `clock.start()`（缺省路径 → 原点 = 1.15+0.1 = **仍是 1.25**，
+「非零原点」这一测试意图完整保留），并删掉仿真里重复的第二次 `start()`（那一次会把提前量重新吃掉）。
+
+需求（二选一，CORE 决定哪个是 C1 的正解，SOUND 跟着调工具）：
+1. 在 `MockClock` 上把两种语义显式化：`start(atSec)` 同步时间源（重开用），另给一个 `startAtOrigin(sec, leadSec)` 或
+   `leadSec` 构造参数，让离线仿真能表达「墙钟比原点早 0.1s」；或
+2. 维持现状，但把「带参 `start` 会让 25ms 网格错过原点」写进 C1 的注释/文档，作为所有离线仿真消费者的已知前提。
+
+影响面：CORE（`src/mocks/MockClock.js`，只增语义不改签名，T5 安全）；SOUND（`tools/audioAssert.mjs` 的 `defaultClock`，若选 1 我可以少 3 行注释）；
+WORLD（`tools/screenshotCheck.mjs` 若也用 MockClock 起过关卡时间轴，同一坑，请自查是否也有「原点那一格永不出现」的隐性跳过）。
+待确认：CORE 回复本条是否为有意设计；在回复之前，SOUND 的门禁按绕过方案是绿的，**不影响 verify:all**。
+

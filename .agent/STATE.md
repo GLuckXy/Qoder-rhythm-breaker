@@ -84,25 +84,26 @@ arrivalSpacing 画进时间轴带（CR-10 批复后待接）。全文见 .agent/
 
 ## SOUND · 本轮变更
 ```
-R2 交付：新增 src/data/levels/level{3,4,5,6}.json（谱面内容，§7.4 六关齐）+ src/audio/Sfx.js（S-08，合成逐字从
-SoundEngine.playSfx 迁出，无新机制）；改 SoundEngine.js（playSfx 变委托 + 新增 playForEvent 作 C7 消费唯一入口）、
-SynthVoices.js（createVoiceEngine 起音 0.0008→0.006，与 buildSchedule 的 RAMP.minAttackSec 对齐，A2 抓出的真爆音）、
-tools/checkLevel.mjs（§11 关卡级 gate：L3 弹幕必须落整数冲刺拍且前后满足 actionRecoveryBeats、L4 变速配置锁死
-「64 拍 120→140 过渡 2 拍」+过渡区间留白、L5 ghostBeats 不落核心拍、L6 freeOrder+windowScale 0.95+三声部核心 ≥6+同窗峰值）、
-tools/audioAssert.mjs（三处口径修正：FM 调制深度节点不再当幅度包络、长阻塞仿真改用带 tempoChanges 的 defaultClock、
-「补发」= 早于跳点的发声；新增 A12 SFX 断言）；删 .agent/run/genL3456.mjs（一次性吐 JSON，src/ 内零 pattern 数组）。
-未动 R1 已验收机制与 CORE-2/WORLD-2 名下文件，未跑 git/npm install。
-数据：L3 chiptune 126/128 61.0s 到达52 密度1.86(声明2.0) 床56 核心15(7/4/4)；L4 dnb 120→140@64 160拍 73.1s 到达83
-2.31(2.5) 床69 核心22(9/7/6) 发声152/仿真152 cues1 变速提示1；L5 glitch 128/144 67.5s 到达64 2.00(2.0) 床64 核心20(8/6/6)
-ghostBeats 8 条(4 压非核心到达拍+4 落空拍，validateGhosts 真触发)；L6 full-arr 132/160 72.7s 到达99 2.75(3.0) 床72 核心27(9/9/9) freeOrder。
-验证：checkLevel --all → PASS 6关 障碍409 核心114 空8拍窗0 同拍跨类0 错误0 警告0；audioAssert --all → PASS 6关 事件757
-轨间差max=2.03dB 混音阶跃max=0.020 音符包络227条 错误0 警告13（全是 R1 既有口径提示）；npm run lint 0/0；npm run build ✓8.84s。
-反向验证全部 FAIL 过并已还原：L3 弹幕 @24.5、L4 transitionBeats=1、L5 ghost@核心拍4、L6 freeOrder=false+windowScale=0.9、
-Sfx 去掉 penalizes 守卫（→ 错误4）。
-偏离与风险：① 实测密度低于 §7.4 声明值（根因仍是 physics 的 1.33 拍下限），已逐关写进 densityNote；② 仍未真实试听，
-音色候选按 T16 全取最保守默认（L3 punch/round/square/bit、L4 metal/reese/fm/ride、L5 metal/reese/fm/bit、
-L6 punch/saw/supo/ride），待人类审美门 1 点名；③ S-18 ReplayAssembler **未做**（CORE-2 正在写 hp/state 的生产者与场景，
-本轮没有消费者，不做无证据交付）；④ Sfx.playForEvent 尚无调用点，请 CORE 接线（口径见 CR-12）。全文见 .agent/rounds/R2-SOUND.md。
+R3 交付（2 项，无第三项）。新增 src/audio/ReplayAssembler.js（S-18，严格按 L-06 只做 2× 分轨重组）：
+纯函数入口 `assembleReplay({events,instances,levelCfg,clock,schedule?,speed=2})` → {startSec,endSec,stems,timeline,events,stats,warnings}；
+CORE-3 结算界面只需 `summarizeReplay(同参).stats`（counts{PERFECT,GOOD,MISS}/perfectRate/denominator/coreHitRate/maxCombo/miss/
+disassembledAtSec/silenceSecAfterDisassemble/revives/stems[]…），分轨时刻表在 `res.stems[i].segments[j]`（openSec/closeSec/hp/kind/
+catchUp:false/points）。另导出 scaleEvents/judgableTotal/coreTotal/replayBoundaryErrors/syntheticSilenceEvents/replaySelfTest。
+口径全部对齐 CR-08/C3/C5：`penalizes===false` 与 `rule:'emptyBeat'` 都不算 MISS（单列 emptyBeats）；Perfect 率分母 = 可判定障碍总数固定、
+bed 的 judgable:false 不进分母；复活段结构上不补发历史；2× 只缩放 t 绝不动顺序；时刻全向 clock.beatAt/timeAtBeat 索取。
+完整版回放（任意时刻分层启动 + 操作剪影同步）= 条约预砍项，**没做**。
+tools/audioAssert.mjs：新增 A11 六关 replay case（判据与实现不同源，MISS/分母/核心率/maxCombo 各自独立重算再比）+ 全局 replaySelfTest
+19 项人造判据；按 leader 裁决新增「同时峰值 >1.0 只记 warning、不改断言阈值」。S-17 是**复核**：轨间差全局 max 2.03dB（≤3）、
+bed −21.5~−23.6dB、hp:0 不发声 0 违规、1ms 最大步长 0.020、六关同时峰值 1.066~1.084 → **未改任何 tracks[].gain / bed.mix，未动合成器**。
+抓到一个真回归并只在自己工具侧修好（0 行越界）：CORE-3 改的 `MockClock.start(atSec)` 会把内部时间源同步到原点，
+使 audioAssert 仿真的 25ms 网格永远错过原点，于是原点上的第一个倒计时点击被记成「迟到 25ms」→ R2 的「错误0」变「错误12」。
+修法：defaultClock 改 `new MockClock({t:1.15})` + `clock.start()`（缺省原点 = now+0.1 = 1.25，非零原点意图不变）并删掉仿真里重复的第二次 start。
+验证（逐字）：audioAssert --all → `RESULT: PASS 6关 事件757 轨间差max=2.03dB(≤3) 混音阶跃max=0.020(≤0.05) 音符包络227条 回放段60 峰值warn6 错误0 警告19`；
+checkLevel --all → `RESULT: PASS 6关 障碍409 核心114 喘息409处/756拍 空8拍窗0 同拍跨类0 错误0 警告0`；
+`npx eslint src/audio tools/audioAssert.mjs tools/checkLevel.mjs` → 0 error 0 warning（`npx eslint src/audio tools` 仅剩 CORE-3 名下
+contractTest.mjs:1654 一个 no-unused-vars，我没动）。已提 CR-14（MockClock 两种建立原点的方式对 SOUND 仿真网格的影响）。
+未做/风险：① ReplayAssembler 尚无浏览器消费者，等 CORE-3 结算界面接线；② 面积功率口径按裁决没启用（bed mix 仍 0.26–0.32）；
+③ 仍未真实试听，音色候选取最保守默认，待人类审美门 1 点名。全文见 .agent/rounds/R3-SOUND.md。未跑 git、未 npm install。
 ```
 
 ## 当前可运行状态
@@ -123,6 +124,14 @@ CORE 自评未完成：① BeatClock.driftMs() 只有 Node 侧口径验证，浏
   ② C7 的 hp/state 两类事件尚无生产者（等 K-07 DisassembleSystem 与 K-05 场景接线）；
   ③ 「真实谱面跑一遍」目前是一次性命令，尚未固化成 contractTest 的 integration case。
 CR-08 / CR-09（CORE 提出，涉及 C1/C2/C4/C7）结论行仍空，WORLD/SOUND 需在下一集成窗口前回复，否则按 T21 记冲突。
+SOUND→全体（leader 已裁决，登记为已知红点，不改断言口径）：**六关混音同时峰值 1.084 > 1.0**（L1 @7.25s / L2 1.084 /
+  L5 1.082 / L4·L6 1.077 / L3 1.066），真 AudioContext 上有削峰风险，目前全靠 SoundEngine 的主压限器兜。
+  leader 裁决 R3：**维持「峰值口径」不变**，若改成「面积功率 ≤3dB」则 bed 的 mix 要从 0.26–0.32 提到 ~0.8 并压低主声部留 headroom（未执行）。
+  audioAssert 已按裁决加一条 **warning（不是 error）**：`混音同时峰值 x > 1.0`，实跑 `峰值warn6`。浏览器试听若听到底鼓+床同拍发闷/破音，这条升级为改口径裁决。
+SOUND→CORE（R3 抓到的回归，已在我工具侧绕过，请 CORE 确认设计意图）：`src/mocks/MockClock.js`（17:48 改）把
+  `start(atSec)` 的内部时间源同步到 atSec，导致 SOUND 仿真的 25ms 网格永远落在 `origin+0.025k` 上、错过原点本身，
+  原点上的第一个倒计时点击恒被记成「迟到 25ms」→ `audioAssert --all` 从 错误0 变 错误12。
+  绕过：`defaultClock` 用 `new MockClock({t:1.15}) + start()`（缺省 now+0.1 = 原点 1.25），六关恢复 错误0 / 节拍器 12·16 全中。见 CR-14。
 ```
 
 ## 下一轮第一步
