@@ -1,0 +1,47 @@
+· 启动 headless 浏览器：C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe
+· 导航 http://127.0.0.1:4174/
+· 已启动 canvas=1256x628 activeScenes=0
+· 截图 E:\Xiang\Qoder\workplace\高校\Qoder-rhythm-breaker\.agent\e2e\lv2\01-title.png
+· 标题界面 ui-root 子节点=1 文案「节奏拆解台 RHYTHM BREAKER · 把一首歌拆回去，再把它拼回来 已就位 6 关 · 已通关 0/6 开始 · L1 选关 设置 空格/J = 跳 · K = 冲 · R = 重开 · Esc = 暂停 · [ ] = 延迟微调（±1ms，当前值见暂停面板）」
+· 已点击标题按钮 BUTTON @231,383
+· AudioContext=running@AudioContext currentTime=1.171 clock.now=0 engine=[opts,ctx,mixer,metronome,voices,levelCfg,clock,schedule,clicks,cues,paused,ready,lastError,stats,_idx,_clickIdx,_cueIdx,_lastBeat,_beatClick,_volumes,_duck,_unlockBound,_gestureHandlers,master,music,sfx,duck,duckPan,voiceKits]
+· 未在关卡内，调 __CORE__.gotoLevel 直达（这是 CORE 暴露的调试入口，非绕过判定链）
+· 关卡内 scenes= now=1.46 state=null pending=56 tracks=2 hp={"kick":4,"bass":4,"synth":0}
+· 截图 E:\Xiang\Qoder\workplace\高校\Qoder-rhythm-breaker\.agent\e2e\lv2\02-level-start.png
+· 自动打点器已装（synthetic key），跑 115s
+· 页内诊断 {"now":1.531,"pendingN":56,"tMin":2,"tMax":57,"first5":[{"id":"lv02-kick-001","t":2,"type":"spike","core":false,"state":"pending","judgable":true},{"id":"lv02-kick-002","t":3,"type":"spike","core":false,"state":"pending","judgable":true},{"id":"lv02-kick-003","t":4,"type":"spike","core":false,"state":"pending","judgable":true},{"id":"lv02-kick-004","t":5,"type":"spike","core":false,"state":"pending","judgable":true},{"id":"lv02-kick-005","t":6,"type":"spike","core":false,"state":"pending","judgable":true}],"probe":{"originSec":0.35,"_originSec":0.35},"windows":"{\"perfectMs\":66,\"goodMs\":121.00000000000001,\"scale\":1.1,\"strict\":false,\"floored\":false,\"bufferMs\":80}","latency":0,"scale":1.1}
+  t+5s Δ墙5.10/Δ钟5.09 r=0.999 fps≈179 state=BUILD 拆解=[] hp={"kick":4,"bass":4,"synth":0} combo=5 判定={"PERFECT":5,"GOOD":0,"MISS":0} pending=51 按键=5
+  t+10s Δ墙5.01/Δ钟5.01 r=1.001 fps≈172 state=PEAK 拆解=[] hp={"kick":3,"bass":3,"synth":0} combo=10 判定={"PERFECT":10,"GOOD":0,"MISS":0} pending=46 按键=10
+  t+15s Δ墙5.11/Δ钟5.11 r=1 fps≈177 state=PEAK 拆解=[] hp={"kick":1,"bass":3,"synth":0} combo=15 判定={"PERFECT":15,"GOOD":0,"MISS":0} pending=41 按键=15
+  t+20s Δ墙5.10/Δ钟5.10 r=1 fps≈180 state=PEAK 拆解=[] hp={"kick":1,"bass":2,"synth":0} combo=20 判定={"PERFECT":20,"GOOD":0,"MISS":0} pending=36 按键=20
+  t+25s Δ墙5.03/Δ钟5.03 r=1 fps≈178 state=PEAK 拆解=[kick] hp={"kick":0,"bass":1,"synth":0} combo=24 判定={"PERFECT":24,"GOOD":0,"MISS":0} pending=11 按键=24
+  t+30s Δ墙5.11/Δ钟5.12 r=1.003 fps≈176 state=PEAK 拆解=[kick] hp={"kick":0,"bass":1,"synth":0} combo=26 判定={"PERFECT":26,"GOOD":0,"MISS":0} pending=9 按键=26
+  t+36s Δ墙5.12/Δ钟5.12 r=1 fps≈178 state=DISASSEMBLED 拆解=[kick|bass] hp={"kick":0,"bass":0,"synth":0} combo=27 判定={"PERFECT":27,"GOOD":0,"MISS":0} pending=0 按键=28
+  t+41s Δ墙5.12/Δ钟5.11 r=0.999 fps≈178 state=DISASSEMBLED 拆解=[kick|bass] hp={"kick":0,"bass":0,"synth":0} combo=27 判定={"PERFECT":27,"GOOD":0,"MISS":0} pending=0 按键=30
+  t+46s Δ墙5.03/Δ钟5.03 r=1 fps≈177 state=DISASSEMBLED 拆解=[kick|bass] hp={"kick":0,"bass":0,"synth":0} combo=27 判定={"PERFECT":27,"GOOD":0,"MISS":0} pending=0 按键=32
+  t+51s Δ墙5.11/Δ钟5.11 r=1.001 fps≈176 state=DISASSEMBLED 拆解=[kick|bass] hp={"kick":0,"bass":0,"synth":0} combo=27 判定={"PERFECT":27,"GOOD":0,"MISS":0} pending=0 按键=33
+  t+56s Δ墙5.08/Δ钟5.07 r=0.999 fps≈180 state=DISASSEMBLED 拆解=[kick|bass] hp={"kick":0,"bass":0,"synth":0} combo=27 判定={"PERFECT":27,"GOOD":0,"MISS":0} pending=0 按键=35
+  t+61s Δ墙5.13/Δ钟5.13 r=1.001 fps≈180 state=SILENCE 拆解=[kick|bass] hp={"kick":0,"bass":0,"synth":0} combo=0 判定={"PERFECT":27,"GOOD":0,"MISS":0} pending=0 按键=35
+  t+66s Δ墙5.14/Δ钟5.14 r=1 fps≈174 state=RESULT 拆解=[kick|bass] hp={"kick":0,"bass":0,"synth":0} combo=0 判定={"PERFECT":27,"GOOD":0,"MISS":0} pending=0 按键=35
+  t+71s Δ墙5.14/Δ钟5.14 r=1.001 fps≈178 state=RESULT 拆解=[kick|bass] hp={"kick":0,"bass":0,"synth":0} combo=0 判定={"PERFECT":27,"GOOD":0,"MISS":0} pending=0 按键=35
+  t+76s Δ墙5.14/Δ钟5.14 r=1.001 fps≈172 state=RESULT 拆解=[kick|bass] hp={"kick":0,"bass":0,"synth":0} combo=0 判定={"PERFECT":27,"GOOD":0,"MISS":0} pending=0 按键=35
+  t+82s Δ墙5.14/Δ钟5.14 r=0.999 fps≈168 state=RESULT 拆解=[kick|bass] hp={"kick":0,"bass":0,"synth":0} combo=0 判定={"PERFECT":27,"GOOD":0,"MISS":0} pending=0 按键=35
+  t+87s Δ墙5.15/Δ钟5.15 r=1 fps≈179 state=RESULT 拆解=[kick|bass] hp={"kick":0,"bass":0,"synth":0} combo=0 判定={"PERFECT":27,"GOOD":0,"MISS":0} pending=0 按键=35
+  t+92s Δ墙5.15/Δ钟5.15 r=1 fps≈176 state=RESULT 拆解=[kick|bass] hp={"kick":0,"bass":0,"synth":0} combo=0 判定={"PERFECT":27,"GOOD":0,"MISS":0} pending=0 按键=35
+  t+97s Δ墙5.14/Δ钟5.14 r=1.001 fps≈175 state=RESULT 拆解=[kick|bass] hp={"kick":0,"bass":0,"synth":0} combo=0 判定={"PERFECT":27,"GOOD":0,"MISS":0} pending=0 按键=35
+  t+102s Δ墙5.14/Δ钟5.13 r=0.998 fps≈171 state=RESULT 拆解=[kick|bass] hp={"kick":0,"bass":0,"synth":0} combo=0 判定={"PERFECT":27,"GOOD":0,"MISS":0} pending=0 按键=35
+  t+107s Δ墙5.14/Δ钟5.15 r=1.001 fps≈180 state=RESULT 拆解=[kick|bass] hp={"kick":0,"bass":0,"synth":0} combo=0 判定={"PERFECT":27,"GOOD":0,"MISS":0} pending=0 按键=35
+  t+112s Δ墙5.14/Δ钟5.14 r=0.999 fps≈180 state=RESULT 拆解=[kick|bass] hp={"kick":0,"bass":0,"synth":0} combo=0 判定={"PERFECT":27,"GOOD":0,"MISS":0} pending=0 按键=35
+· 截图 E:\Xiang\Qoder\workplace\高校\Qoder-rhythm-breaker\.agent\e2e\lv2\03-mid-play.png
+· 终局诊断 {"clockState":null,"running":true,"loopId":"number","now":116.71,"origin":0.35,"beat":232.72,"lengthBeats":null,"dsState":"RESULT","runtimeRunning":null,"pending":0,"ticks":null}
+· 等待 0s 后出现界面层：节点=1 state=RESULT 文案「B L2 脉冲 还能更准 · 全声部已拆解 → 寂静段走完 评级 Perfect 率 69.2% 谱面 Perfect 率 48.2% 核心命中率 57% 最高连击 27 MISS 0 光点 MISS 12 分母 = 本关可判定障碍 56（固定分母，与复活/重开无关） · PERFECT 27 · 核心 14 · 背景层不计入 评级口径 = （PERFECT 27 + 踩灭光点 0）/（实际遭遇障」
+· 自动打点汇总 {"fires":0,"stale":0,"byGrade":{"PERFECT":27,"GOOD":0,"MISS":0},"queueShape":null,"judgmentFields":"grade,obstacleId,track,type,isCore,actionMatch,deltaMs,rule,trigger,key,penalizes,atSec","noteCount":27,"targets":35,"frames":20335}
+· 终态 state=RESULT ui节点=1 UI文案「B L2 脉冲 还能更准 · 全声部已拆解 → 寂静段走完 评级 Perfect 率 69.2% 谱面 Perfect 率 48.2% 核心命中率 57% 最高连击 27 MISS 0 光点 MISS 12 分母 = 本关可判定障碍 56（固定分母，与复活/重开无关） · PERFECT 27 · 核心 14 · 背景层不计入 评级口径 = （PERFECT 27 + 踩灭光点 0）/（实际遭遇障碍 27 + 进场光点 12）= 27/」
+· 结算数据 stats={"state":"RESULT","total":56,"coreTotal":14,"baseTotal":56,"baseCoreTotal":14,"revivedIssued":0,"perfect":27,"corePerfect":8,"good":0,"miss":0,"dotMiss":12,"combo":0,"maxCombo":27,"perfectRate":0.48214285714285715,"coreHitRate":0.5714285714285714,"encounterObstacles":27,"encounterDots":12,"encounterTotal":39,"encounterPerfect":27,"encounterRate":0.6923076923076923,"dotsStomped":0,"dotsLive":12,"rank":"B","hp":{"kick":0,"bass":0,"synth":0},"disassembled":true,"disassembledTracks":["kick","bass"],"disassembleBeat":{"kick":47.3,"bass":64.76133333333333,"synth":null},"freeOrder":false,"dots":[{"beat":116,"state":"expired"},{"beat":117,"state":"expired"},{"beat":118,"state":"expired"},{"beat":119,"state":"expired"},{"beat":120,"state":"expired"},{"beat":121,"state":"expired"},{"beat":122,"state":"expired"},{"beat":123,"state":"expired"},{"beat":124,"state":"expired"},{"beat":125,"state":"expired"},{"beat":126,"state":"expired"},{"beat":127,"state":"expired"}]}
+· 存档 levels={"2":{"cleared":true,"rank":"B","perfectRate":0.4821,"maxCombo":27,"miss":0,"encounterRate":0.6923}}
+· 截图 E:\Xiang\Qoder\workplace\高校\Qoder-rhythm-breaker\.agent\e2e\lv2\04-final.png
+· 重开 20 次：done → 重开后 pending=55 ignored=48 canvas=1 running=true now=121.87
+
+================ 浏览器实测结论 ================
+游戏自身 console 错误数 = 0（另有 0 条来自本取证脚本自身，已单列）
+自动打点击发 0 次 · 判定分布 {"PERFECT":27,"GOOD":0,"MISS":0}

@@ -360,3 +360,29 @@ CORE-7 修根因、CORE-8 补口径，leader 全部独立复跑确认（不是�
 
 DEF-05 属需求缺口，口径已写进 `.agent/CONTRACTS.md` 并同步 README 已知限制第 11 条，**待需求方复核**；
 备选口径（拆解不退役 / 只退役在场 / 重排谱面）记在同一张卡里，未采用不等于被否定。
+
+---
+
+## R10 · 六关浏览器全流程实跑（v0.1.0 取证基线）
+
+`node .agent/e2e/browserE2E.mjs --lv=N --secs=115 --out=.agent/e2e/lvN`，逐关独立进程、独立证据目录，
+机器空载（`fps≈178~180`，`r=Δ墙/Δ钟≈1.000`）：
+
+| 关 | 退出码 | 终态 | 评级 | 遭遇口径 | 谱面口径 | 光点 MISS | console 错误 | 重开 20 次 |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 0 | RESULT | C | 33.3% | 7.3% | 8 | 0 | pending=55 |
+| 2 | 0 | RESULT | B | 69.2% | 48.2% | — | 0 | ✓ |
+| 3 | 0 | RESULT | A | 73.3% | 63.5% | — | 0 | ✓ |
+| 4 | 0 | RESULT | A | 76.5% | 47.0% | — | 0 | ✓ |
+| 5 | 0 | RESULT | A | 73.3% | 51.6% | — | 0 | ✓ |
+| 6 | 0 | RESULT | A | 75.0% | 36.4% | 12 | 0 | pending=98 |
+
+L6 是多声部+最高密度关，实测 `拆解=[kick|bass|synth]` 三轨全拆、`maxCombo=36`、`miss=0`。
+评级从旧口径的「六关全 C」变成 B/A/A/A/A 的分布——**评级功能第一次在真实运行里区分出了打得好的局**，
+这是 DEF-05 那条裁决的实际收益。没到 S 的原因是自动打点器不踩寂静段光点，正是 Q5 要的堵刷分行为。
+
+存档侧同样核过：`localStorage["rhythm-breaker/save"].levels["6"]`
+= `{cleared:true, rank:"A", perfectRate:0.3636, maxCombo:36, miss:0, encounterRate:0.75}`
+（`encounterRate` 由 leader 在 `LevelRuntime._writeSave:221` 接线，浏览器里读的是接线后的真值）。
+
+仍未验收的（不许因为这张表就当作已过）：真人试玩、音色人耳验收、多浏览器、`QUALITY_PRESETS` 三档观感。

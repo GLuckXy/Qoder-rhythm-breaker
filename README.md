@@ -142,10 +142,13 @@ npm run verify:all       # 依次跑上面五道 + lint，任一红即退出码�
    绘制真相归 WORLD，CORE 不猜数；`screenshotCheck` 那一组目前按 SKIP 处理。
 7. **`npm run build` 依赖 WORLD 名下的 `src/game/objects/Timeline.js` 能解析**——`?selftest=render` 的负载按
    `world-selftest/v1` 契约必须带 `timeline` 快照，所以该文件进了浏览器图。WORLD 编辑期间的语法抖动会连带卡构建。
-8. **浏览器实跑目前只覆盖 L1 一条完整路径**（无头 Edge + CDP 可信按键，从起跑到结算屏出现）。它抓出了 Node 侧断言
-   测不到的一整类缺陷：拆解/复活把实例摘队后旧超时定时器仍在补发 MISS、`registerObstacles` 的重开语义被热路径复用
-   导致已判实例拉回 pending 反复重判（`MISS` 实测冲到 149903），以及上面说的「永远进不了结算」。
-   但 **L2–L6 的浏览器全流程仍未实跑过**，同一类问题是否在多声部/变速关卡里以别的形态出现，尚待逐关验证。
+8. **六关都跑过真实浏览器全流程**（无头 Edge + CDP 可信按键，从起跑到结算屏出现），逐关 `state=RESULT`、
+   游戏自身 console 错误 0、重开 20 次无残留。浏览器实测抓出过一整类 Node 侧 800 条断言测不到的缺陷：
+   拆解/复活把实例摘队后旧超时定时器仍在补发 MISS（实测冲到 149903）、`registerObstacles` 的重开语义被热路径复用
+   导致已判实例反复重判，以及 R6 那条「起关顺序把终点 schedule 清掉 → 永远进不了结算」。
+   证据在 `.agent/e2e/sweep-lv{2..6}.txt` 与 `stdout-run7.txt`。**但它仍是机器打法**：自动打点器只打障碍、
+   不踩寂静段光点，所以六关评级落在 B/A/A/A/A 而不是 S——这是口径设计使然（Q5），不等于真人试玩过。
+   **真人一次都没玩过**，难度曲线、手感、音色好不好听仍未验收。
 9. **favicon 走内联 data-URI SVG**（`index.html`），不新增素材文件；这同时消掉了 `/favicon.ico` 的两条 404，
    「console 零报错」这条验收线目前只在 L1 路径上核过。
 10. **音效里 `revive` / `ui` 两个是「调用点直发」**（SOUND 的 `SFX_TRIGGERS` 明确登记 C7 事件流里没有这两类）。
