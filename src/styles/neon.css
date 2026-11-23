@@ -1,7 +1,304 @@
+/* src/styles/neon.css — Owner: WORLD（W-01 / C8「全项目禁止散落颜色字面量」的 CSS 侧）
+ *
+ * 这是 **CSS token 层**，不是样式表的黑洞：
+ *   1. `:root` 里的 49 个 `--rb-*` 与 `src/data/theme.js` 的 `cssTokens()` 逐值同源
+ *      （`node tools/screenshotCheck.mjs` 的 render:colors 组会逐条比对，改了 theme 不改这里 → 门禁红）。
+ *   2. CORE 的 DOM 界面层（`#ui-root`，L-04：DOM 覆盖在 canvas 之上）**只许引用 var(--rb-*)**，
+ *      不许再写第二条 #rrggbb / rgb() / hsl()。
+ *   3. 需要半透明/混合时用 `color-mix(in srgb, var(--rb-x) N%, transparent)`，
+ *      透明度归 `theme.js` 的 ALPHA/alphaOf 口径管，CSS 侧不引入新色相。
+ *   4. 分区（HUD 8% / 世界 60% / 时间轴 32%）与判定线 x 用 `--rb-zone-*` / `--rb-ratio-judgeX` 算，
+ *      与 `theme.buildView()` 同一个比例，两层不可能各画各的。
+ *
+ * 别名（登记在 screenshotCheck 的 CSS_ALIAS_OF，值必须等于对应 token 或其 var() 间接）：
+ *   --rb-bg = --rb-base      底色（沿用 D0 的名字，CORE 老代码可直接用）
+ *   --rb-ink = --rb-white    正文/大字
+ *   --rb-hairline = --rb-divider   分区分隔线
+ *   --rb-panel = --rb-bandHud      HUD/面板底
+ *   --rb-panel-strong = --rb-bandTimeline  读谱带底（更醒目的面板层）
+ */
+
 :root {
-  /* Owner: WORLD. leader 的 D0 占位；WORLD 在 R1 用 src/data/theme.js 的值全量重写本文件。 */
-  --rb-bg: #0a0e1a;
+  /* ── 1 · 色板（C8 冻结：三声部 + 系统双色 + 底色；其余全部是消色差派生） ────────── */
+  --rb-base: #0a0e1a;
+  --rb-kick: #ff4757;
+  --rb-bass: #ffd166;
+  --rb-synth: #ff2d78;
+  --rb-system: #00f0ff;
+  --rb-white: #ffffff;
+
+  /* ── 2 · 派生（base↔white 轴，不产生新色相） ─────────────────────────────── */
+  --rb-bandTimeline: #131622;
+  --rb-bandHud: #161a25;
+  --rb-divider: #2c303a;
+  --rb-parallaxFar: #1c202b;
+  --rb-parallaxMid: #2a2d38;
+  --rb-parallaxNear: #3b3e48;
+  --rb-beatTick: #4a4d56;
+  --rb-barLine: #76787f;
+  --rb-ground: #898b91;
+  --rb-dim: #232631;
+
+  /* ── 3 · 声部三通道（L-08 色盲冗余）：色相 / 明度变体 / 形状 ─────────────────── */
+  --rb-track-kick: #ff4757;
+  --rb-marker-kick: #e74151;
+  --rb-shape-kick: triangle;
+  --rb-track-bass: #ffd166;
+  --rb-marker-bass: #ffd36e;
+  --rb-shape-bass: platformBar;
+  --rb-track-synth: #ff2d78;
+  --rb-marker-synth: #ff83af;
+  --rb-shape-synth: hexagon;
+
+  /* ── 4 · 分区比与画面比例（与 theme.buildView 同口径） ─────────────────────── */
+  --rb-zone-hud: 0.08;
+  --rb-zone-world: 0.6;
+  --rb-zone-timeline: 0.32;
+  --rb-ratio-judgeX: 0.3;
+  --rb-ratio-groundY: 0.52;
+  --rb-ratio-pxPerBeat: 0.115;
+  --rb-ratio-dashDist: 0.12;
+  --rb-ratio-jumpPeakH: 0.2;
+  --rb-ratio-jumpAirBeats: 0.9;
+  --rb-ratio-dashDurBeats: 0.35;
+  --rb-ratio-charH: 0.075;
+  --rb-ratio-platformTiers: 0.1 0.16 0.21;
+
+  /* ── 5 · 字号阶（PERF-05：@1080p 基准，最小 20px）与字体 ────────────────────── */
+  --rb-font-display: 104px;
+  --rb-font-title: 56px;
+  --rb-font-hud: 30px;
+  --rb-font-sub: 24px;
+  --rb-font-body: 22px;
+  --rb-font-caption: 20px;
+  --rb-font-debug: 20px;
+  --rb-font-family: ui-monospace, "JetBrains Mono", "SFMono-Regular", Consolas, "Noto Sans SC", "Microsoft YaHei", monospace;
+
+  /* ── 6 · 演出档（T16：默认最保守 quiet；界面若做「特效」开关读这三个） ────────── */
+  --rb-particles-per-burst: 12;
+  --rb-particles-live-max: 80;
+  --rb-bloom-intensity: 0;
+  --rb-quality: quiet;
+
+  /* ── 7 · 别名（历史名 + 语义名，值仍来自上面的 token） ─────────────────────── */
+  --rb-bg: var(--rb-base);
+  --rb-ink: var(--rb-white);
+  --rb-hairline: var(--rb-divider);
+  --rb-panel: var(--rb-bandHud);
+  --rb-panel-strong: var(--rb-bandTimeline);
 }
-html, body { margin: 0; padding: 0; background: #0a0e1a; overflow: hidden; }
-#game-root, #ui-root, #debug-root { position: absolute; inset: 0; }
-#ui-root, #debug-root { pointer-events: none; }
+
+/* ═══════════════════════════════════════════════════════════
+ * 布局基座：三个挂载点由 index.html 提供（game-root / ui-root / debug-root）
+ * Phaser 画布在 game-root，DOM 界面覆盖在 ui-root（L-04），调试面板在 debug-root。
+ * ═══════════════════════════════════════════════════════════ */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--rb-bg);
+  color: var(--rb-ink);
+  font-family: var(--rb-font-family);
+  overflow: hidden;
+  /* 触屏误触缩放：读谱距离一旦变化，4 拍预告的像素含义就漂了 */
+  touch-action: manipulation;
+}
+
+#game-root,
+#ui-root,
+#debug-root {
+  position: absolute;
+  inset: 0;
+}
+
+#game-root {
+  z-index: 0;
+}
+
+/* 界面层默认穿透鼠标事件：CORE 给具体控件显式打开 pointer-events */
+#ui-root,
+#debug-root {
+  z-index: 2;
+  pointer-events: none;
+}
+
+#ui-root button,
+#ui-root input,
+#ui-root select,
+#ui-root a,
+#ui-root [data-interactive="true"],
+#debug-root {
+  pointer-events: auto;
+}
+
+canvas {
+  display: block;
+  image-rendering: auto;
+}
+
+/* ═══════════════════════════════════════════════════════════
+ * 分区参考层（可选）：DOM 若要和 canvas 的 8/60/32 严格同带，用这三个类，
+ * 不要自己写百分比 —— 比例与 theme.ZONE_RATIOS 同源。
+ * ═══════════════════════════════════════════════════════════ */
+.rb-band {
+  position: absolute;
+  left: 0;
+  right: 0;
+}
+
+.rb-band-hud {
+  top: 0;
+  height: calc(var(--rb-zone-hud) * 100vh);
+}
+
+.rb-band-world {
+  top: calc(var(--rb-zone-hud) * 100vh);
+  height: calc(var(--rb-zone-world) * 100vh);
+}
+
+.rb-band-timeline {
+  bottom: 0;
+  height: calc(var(--rb-zone-timeline) * 100vh);
+}
+
+/* 判定线参考列：DOM 弹字/教学浮层要和画布判定线对齐时用（0.30W，纪律 2） */
+.rb-judge-column {
+  position: absolute;
+  left: calc(var(--rb-ratio-judgeX) * 100vw);
+  top: 0;
+  bottom: 0;
+  width: 0;
+}
+
+/* ═══════════════════════════════════════════════════════════
+ * 文字层级（大字标题 / HUD 数字 / 正文 / 最小可读）
+ * 尺寸是 1080p 基准 px；需要随视口缩小时用 min()/vw 夹住，不要另立字号。
+ * ═══════════════════════════════════════════════════════════ */
+.rb-text {
+  color: var(--rb-ink);
+  text-rendering: optimizeLegibility;
+}
+
+.rb-text-display {
+  font-size: min(var(--rb-font-display), 14vw);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.05;
+}
+
+.rb-text-title {
+  font-size: min(var(--rb-font-title), 8vw);
+  font-weight: 700;
+}
+
+.rb-text-hud {
+  font-size: min(var(--rb-font-hud), 5vw);
+  font-variant-numeric: tabular-nums;
+}
+
+.rb-text-sub {
+  font-size: min(var(--rb-font-sub), 4vw);
+}
+
+.rb-text-body {
+  font-size: min(var(--rb-font-body), 3.2vw);
+}
+
+.rb-text-caption,
+.rb-text-debug {
+  font-size: min(var(--rb-font-caption), 2.6vw);
+}
+
+.rb-num {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+/* 拆解点/评级大字：白字 + 系统青外发光的唯一合法写法（不引入新色） */
+.rb-glow-system {
+  color: var(--rb-ink);
+  text-shadow: 0 0 0.5em color-mix(in srgb, var(--rb-system) 70%, transparent);
+}
+
+/* ═══════════════════════════════════════════════════════════
+ * 声部标记（图例 / HP 点 / 结算分轨条）：颜色与形状都来自 token，
+ * 灰度化后靠形状分辨（L-08），所以 data-track 的三种形状不许合并成一种。
+ * ═══════════════════════════════════════════════════════════ */
+.rb-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  color: var(--rb-ink);
+  font-size: var(--rb-font-caption);
+}
+
+.rb-chip::before {
+  content: "";
+  width: 1em;
+  height: 1em;
+  background: var(--chip-marker);
+  /* 形状通道：三角 / 横条 / 六边形（clip-path 不引入新色，只改轮廓） */
+  clip-path: var(--chip-clip);
+}
+
+.rb-chip[data-track="kick"] {
+  --chip-marker: var(--rb-marker-kick);
+  --chip-clip: polygon(50% 0%, 100% 100%, 0% 100%);
+}
+
+.rb-chip[data-track="bass"] {
+  --chip-marker: var(--rb-marker-bass);
+  --chip-clip: polygon(0% 25%, 100% 25%, 100% 75%, 0% 75%);
+}
+
+.rb-chip[data-track="synth"] {
+  --chip-marker: var(--rb-marker-synth);
+  --chip-clip: polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%);
+}
+
+/* HP 点：满耐久实心、已扣空心（拆解进度的第二编码） */
+.rb-hp {
+  display: inline-flex;
+  gap: 0.25em;
+}
+
+.rb-hp > i {
+  width: 0.7em;
+  height: 0.7em;
+  border-radius: 50%;
+  background: var(--chip-marker, var(--rb-system));
+}
+
+.rb-hp > i[data-spent="true"] {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--rb-hairline);
+}
+
+/* ═══════════════════════════════════════════════════════════
+ * 键盘可达性（L-04 白送的能力，别丢掉）：焦点环必须看得见，且不遮挡读谱
+ * ═══════════════════════════════════════════════════════════ */
+:where(button, a, input, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--rb-system);
+  outline-offset: 2px;
+}
+
+.rb-hidden {
+  display: none !important;
+}
+
+/* 界面面板通用底：半透明让画布透出来，颜色仍只有 base/divider 两种 */
+.rb-panel {
+  background: color-mix(in srgb, var(--rb-panel) 78%, transparent);
+  border: 1px solid color-mix(in srgb, var(--rb-hairline) 70%, transparent);
+  color: var(--rb-ink);
+  border-radius: 4px;
+  padding: 0.6em 0.9em;
+}
+
+/* 降低动效偏好：演出可减，但读谱几何（分区/判定线/拍距）不许动 */
+@media (prefers-reduced-motion: reduce) {
+  .rb-anim {
+    animation: none !important;
+    transition: none !important;
+  }
+}

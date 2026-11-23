@@ -1,0 +1,367 @@
+// src/game/render/WorldLayer.js — Owner: WORLD（W-01 总入口 / W-04 挂接 / W-05 下层）
+// 上层世界的**总入口**：CORE 的 LevelScene 只需这三个方法（签名即契约，R2 集成请勿改形）：
+//
+//   import WorldLayer from '../render/WorldLayer.js';
+//   const world = new WorldLayer();
+//   world.init(scene);                          // scene.create() 里调一次（scene 需有 add.graphics()）
+//   world.sync({ clock, instances, view }, extra);   // 每帧一次；与调用时刻/帧序无关（纯函数）
+//   world.shutdown();                           // scene 的统一 teardown（K-05）里调
+//
+// 可选第二参 extra（都由 CORE 的事件驱动，WORLD 只被动消费）：
+//   {
+//     judgment,                     // C2 Judgment 原样传入（W-07 演出消费 fx 标志）
+//     disassembledTracks:[track],   // C3 'disassemble'
+//     revivedIds:[id],              // C3 'revive' 后生成侧的新实例 id
+//     hpByTrack:{kick:3,...},       // C3 'hp-change' 汇总（远景变安静，VIS-06）
+//     action:{kind,atSec},          // ★ 玩家动作（W-03）：kind='jump'|'dash'|'fine'|'hit'，atSec 绝对秒
+//     combo,                        // 连击数（≥10 时判定线走金边，W-07）
+//     view
+//   }
+// 查询：world.player / world.snapshot(clockOrNow) / world.live() / world.get(id)
+//       world.worldYOf(trackOrInstance, view?)  —— 声部在世界层的 y（剪影/特效对齐用）
+//
+// 纪律 1：本文件不出现 scene.time / this.time.now / 速度积分。时间只从 clock.now() 读一次，
+//         然后作为参数传给所有纯几何函数。
+// 纪律 2：判定线 x 与 pxPerBeat 只在 view 里存在，上下层共用（下层 = objects/Timeline.js）。
+// 纪律 3：颜色只在 draw 时从 theme 取。
+//
+// 注意：**不 import Phaser**。绘制容器由 host.add.graphics() 提供，本文件只调它的方法。
+
+import { buildView, isView, resolveView } from '../../data/theme.js';
+import { Background } from './Background.js';
+import Spike from '../objects/Spike.js';
+import Platform from '../objects/Platform.js';
+import Barrage from '../objects/Barrage.js';
+import Player, { fixedX } from '../objects/Player.js';
+import {
+  Obstacle,
+  beatsToJudge,
+  isLiveState,
+  isRenderableInstance,
+  laneKeyOf,
+  obstacleScreenX,
+  readNowSec,
+  spawnLeadBeats,
+  worldSpawnX,
+  worldYFor
+} from '../objects/Obstacle.js';
+
+export const WORLD_LAYER_VERSION = 'R1.0';
+
+/** type/track → 包裹类（新增 Platform/Barrage 时只加这张表，不改挂接逻辑） */
+const CLASS_BY_TYPE = { spike: Spike, platform: Platform, barrage: Barrage };
+const CLASS_BY_TRACK = { kick: Spike, bass: Platform, synth: Barrage };
+
+export class WorldLayer {
+  constructor(opts = {}) {
+    this.opts = opts;
+    this.host = null;
+    this.view = buildView(1920, 1080, {});
+    this.background = new Background(opts.background || {});
+    /** id → Obstacle 子类包裹对象（同 id 二次下发 = 换绑而非追加；不做历史改写） */
+    this.wraps = new Map();
+    /** 拆解态声部：该类的终态实例不再画（DIS-04/07） */
+    this.disassembledTracks = new Set();
+    this.calm = 0; // 0..1 远景安静度（VIS-06）
+    this.g = { bg: null, obstacles: null, player: null, fx: null };
+    /** 角色（W-03）：opts.player === false 时不建（CORE 想自绘时） */
+    this.player = opts.player === false ? null : new Player(opts.player || {});
+    this.frameStats = { nowSec: 0, nowBeat: 0, instances: 0, visible: 0, drawn: 0, layers: 0 };
+    this.ready = false;
+  }
+
+  // ------------------------------------------------------------------ 生命周期
+
+  /**
+   * @param {object} host Phaser Scene（用到 host.add.graphics()）
+   * @param {object} [view] 可先给 view；否则第一次 sync 时按传入尺寸建立
+   */
+  init(host, view = null) {
+    if (!host || !host.add || typeof host.add.graphics !== 'function') {
+      throw new Error('[WorldLayer] init(host) 需要一个提供 add.graphics() 的 Phaser Scene');
+    }
+    this.host = host;
+    if (view) this.view = resolveView(view);
+    this.g.bg = host.add.graphics();
+    this.g.obstacles = host.add.graphics();
+    this.g.player = host.add.graphics();
+    this.g.fx = host.add.graphics(); // W-07 的碎裂/大字/vignette 画在这里（同帧入口）
+    if (this.g.bg.setDepth) this.g.bg.setDepth(0);
+    if (this.g.obstacles.setDepth) this.g.obstacles.setDepth(1);
+    if (this.g.player.setDepth) this.g.player.setDepth(2);
+    if (this.g.fx.setDepth) this.g.fx.setDepth(3);
+    this.background.layout(this.view);
+    if (this.player) this.player.layout(this.view);
+    this.ready = true;
+    return this;
+  }
+
+  /** 统一 teardown（K-05 的 shutdown 登记点）：销毁 Graphics、清空挂接表 */
+  shutdown() {
+    for (const key of Object.keys(this.g)) {
+      const gfx = this.g[key];
+      if (!gfx) continue;
+      if (typeof gfx.clear === 'function') gfx.clear();
+      if (typeof gfx.destroy === 'function') gfx.destroy();
+      this.g[key] = null;
+    }
+    this.wraps.clear();
+    this.disassembledTracks.clear();
+    this.background.shutdown();
+    this.host = null;
+    this.ready = false;
+    return this;
+  }
+
+  // ------------------------------------------------------------------ 每帧入口
+
+  /**
+   * @param {{clock:object|number, instances?:object[], view?:object}} frame
+   * @param {{judgment?:object, disassembledTracks?:string[], revivedIds?:string[], hpByTrack?:Record<string,number>}} [extra]
+   * @returns {object} frameStats（供 DebugPanel）
+   */
+  sync(frame, extra = {}) {
+    if (!this.ready) throw new Error('[WorldLayer] sync() 之前必须先 init(host)');
+    const nowSec = readNowSec(frame.clock);
+    const view = this._resolveView(frame.view || extra.view);
+    const instances = (frame.instances || []).filter(isRenderableInstance);
+
+    if (extra.hpByTrack) this.calm = calmOf(extra.hpByTrack);
+    if (Array.isArray(extra.disassembledTracks)) this.disassembledTracks = new Set(extra.disassembledTracks);
+    if (this.player) this.applyAction(extra.action, nowSec, view);
+
+    this._reconcile(instances, nowSec, view);
+    if (extra.judgment) this.applyJudgment(extra.judgment, nowSec);
+    if (Array.isArray(extra.revivedIds)) this.applyRevived(extra.revivedIds);
+    this._render(nowSec, view, instances);
+    return this.frameStats;
+  }
+
+  _resolveView(view) {
+    if (!view) return this.view;
+    if (isView(view)) {
+      if (view.width !== this.view.width || view.height !== this.view.height) {
+        this.view = view;
+        this.background.layout(view);
+      } else this.view = view;
+      return this.view;
+    }
+    const next = resolveView(view);
+    if (next.width !== this.view.width || next.height !== this.view.height) {
+      this.view = next;
+      this.background.layout(next);
+    } else this.view = next;
+    return this.view;
+  }
+
+  /** 挂接：只增不删地镜像生成侧的实例表；被摘除者 retire 后等演出结束再清 */
+  _reconcile(instances, nowSec, view) {
+    const lead = spawnLeadBeats(view);
+    const seen = new Set();
+    for (const inst of instances) {
+      if (!inst || typeof inst.id !== 'string') continue;
+      seen.add(inst.id);
+      let wrap = this.wraps.get(inst.id);
+      if (!wrap) {
+        if (beatsToJudge(inst, nowSec, view) > lead) continue; // 超出出生提前量：下一帧再看
+        const Cls = CLASS_BY_TYPE[inst.type] || CLASS_BY_TRACK[inst.track] || Obstacle;
+        wrap = new Cls(inst, { ...this.opts, maxLeadBeats: lead });
+        if (wrap.laneKey !== laneOf(inst)) continue; // 跨泳道 id 冲突：不覆盖，交给 SOUND 的 CR-11
+        this.wraps.set(inst.id, wrap);
+      } else {
+        wrap.attach(inst, nowSec);
+      }
+    }
+    for (const [id, wrap] of this.wraps) {
+      if (seen.has(id)) continue;
+      if (wrap.retired || !isLiveState(wrap.state)) this.wraps.delete(id);
+      else wrap.retire();
+    }
+    // 终态且演出已播完（无待消费 fx）的实例回收
+    for (const [id, wrap] of this.wraps) {
+      if (!isLiveState(wrap.state) && !wrap.fx.judged && !wrap.fx.missed && !wrap.fx.disintegrating) this.wraps.delete(id);
+    }
+  }
+
+  _render(nowSec, view, instances) {
+    if (this.g.bg) this.background.draw(this.g.bg, { view, nowSec, calm: this.calm, pulse: pulseOf(nowSec, view) });
+    const g = this.g.obstacles;
+    if (!g) return this.frameStats;
+    g.clear();
+    let visible = 0;
+    let drawn = 0;
+    for (const wrap of this.wraps.values()) {
+      wrap.update(nowSec, view);
+      if (!wrap.screen.onScreen) continue;
+      visible++;
+      if (this.disassembledTracks.has(wrap.track) && !isLiveState(wrap.state)) continue;
+      if (wrap.render(g, view)) drawn++;
+    }
+    this.frameStats = {
+      nowSec,
+      nowBeat: view.timeToBeat ? view.timeToBeat(nowSec) : nowSec / (view.beatSec || 1),
+      instances: instances.length,
+      wrapped: this.wraps.size,
+      visible,
+      drawn,
+      layers: this.background.layers.length,
+      judgeX: view.judgeX,
+      pxPerBeat: view.pxPerBeat,
+      spawnX: worldSpawnX(view),
+      playerX: this.player ? this.player.screen.x : fixedX(view),
+      playerState: this.player ? this.player.screen.state : 'run'
+    };
+    return this.frameStats;
+  }
+
+  /**
+   * ★ W-03 的玩家动作入口（CORE 在输入/判定处调用，只带**绝对时刻**，不带位移）。
+   * kind: 'jump' | 'dash' | 'fine'（微调）| 'hit'；null/undefined = 本帧无动作。
+   * 动作之后的位置/高度全部由 Player 的纯函数在每帧 update 里现算（纪律 1）。
+   */
+  applyAction(action, nowSec, view = this.view) {
+    if (!this.player) return false;
+    if (this._lastActionAt !== (action && action.atSec) || this._lastActionKind !== (action && action.kind)) {
+      if (action && typeof action.atSec === 'number') {
+        if (action.kind === 'jump') this.player.jump(action.atSec, view.beatSec);
+        else if (action.kind === 'dash') this.player.dash(action.atSec, view.beatSec);
+        else if (action.kind === 'fine' || action.kind === 'micro') this.player.fine(action.atSec, view.beatSec);
+        else if (action.kind === 'hit') this.player.hit(action.atSec);
+        else if (action.kind === 'run' || action.kind === 'reset') this.player.reset(action.atSec);
+      }
+      this._lastActionAt = action && action.atSec;
+      this._lastActionKind = action && action.kind;
+    }
+    this.player.layout(view);
+    this.player.update(nowSec, view);
+    const g = this.g.player;
+    if (g) {
+      g.clear();
+      this.player.render(g, view);
+    }
+    return true;
+  }
+
+  // ------------------------------------------------------------------ 事件消费（被动）
+
+  /** ★ 只转发 CORE 的 Judgment（C2）；本文件不含命中逻辑 */
+  applyJudgment(judgment, nowSec = null) {
+    const wrap = this.wraps.get(judgment && judgment.obstacleId);
+    if (!wrap) return false;
+    const moved = wrap.onJudgment(judgment);
+    if (moved && typeof this.opts.onFx === 'function') this.opts.onFx({ ...wrap.fx }, wrap, nowSec);
+    return moved;
+  }
+
+  /** DIS-04：该声部拆解 → 在场实例标记碎裂（W-07 的 EffectSystem 消费 fx.disintegrating） */
+  markTrackDisassembled(track) {
+    this.disassembledTracks.add(track);
+    const onStage = [];
+    for (const wrap of this.wraps.values()) {
+      if (wrap.track !== track) continue;
+      wrap.markDisassembling();
+      onStage.push(wrap.id);
+    }
+    return onStage;
+  }
+
+  /** C3 'revive'：复活的新实例由生成侧下发（新 id，state:'revived'）；这里只点亮 fx */
+  applyRevived(ids) {
+    const hit = [];
+    for (const id of ids || []) {
+      const wrap = this.wraps.get(id);
+      if (!wrap) continue;
+      wrap.fx.revived = true;
+      hit.push(id);
+    }
+    return hit;
+  }
+
+  // ------------------------------------------------------------------ 查询
+
+  get(id) {
+    return this.wraps.get(id) || null;
+  }
+
+  /** 在场（可判定态）包裹对象；W-07 全屏碎裂要遍历的就是这个集合 */
+  live() {
+    return [...this.wraps.values()].filter((w) => isLiveState(w.state));
+  }
+
+  /** 声部在世界的 y（给 Player/剪影/特效对齐用） */
+  worldYOf(trackOrInstance, view = null) {
+    return worldYFor(trackOrInstance, view || this.view);
+  }
+
+  /** 本帧几何快照（纯数据，供 screenshotCheck / DebugPanel / selftest 端点） */
+  snapshot(clockOrNow) {
+    const nowSec = typeof clockOrNow === 'number' ? clockOrNow : readNowSec(clockOrNow || 0);
+    const items = [];
+    for (const wrap of this.wraps.values()) {
+      items.push({
+        id: wrap.id,
+        track: wrap.track,
+        shape: wrap.shape,
+        state: wrap.state,
+        core: wrap.core,
+        x: obstacleScreenX(wrap.instance, nowSec, this.view),
+        y: worldYFor(wrap.track, this.view, { pitchTier: wrap.pitchTier }),
+        beatsToJudge: beatsToJudge(wrap.instance, nowSec, this.view)
+      });
+    }
+    return {
+      version: WORLD_LAYER_VERSION,
+      view: {
+        width: this.view.width,
+        height: this.view.height,
+        judgeX: this.view.judgeX,
+        groundY: this.view.groundY,
+        pxPerBeat: this.view.pxPerBeat,
+        pxPerSec: this.view.pxPerSec,
+        rightSpawnX: worldSpawnX(this.view),
+        timelineTop: this.view.zones.timelineTop
+      },
+      player: this.player
+        ? { ...this.player.probeAt(nowSec, this.view), fixedX: fixedX(this.view), size: this.view.sizes.player }
+        : null,
+      nowSec,
+      layers: this.background.layers.map((l) => ({ name: l.name, factor: l.factor, traces: l.traces.length })),
+      items,
+      stats: this.frameStats
+    };
+  }
+}
+
+function laneOf(inst) {
+  // ★ 必须与 Obstacle 包裹对象的 laneKey 同一函数：先前这里另算了一份（`id.split('-')[0..1]`
+  //   → `lv01-kick`），而 laneKeyOf 给的是 `1-kick`，两者不等 → 每个实例都被下面的跨道保护
+  //   拦掉，上层世界画不出任何障碍（真谱面必现）。现改为唯一口径。
+  return laneKeyOf(inst);
+}
+
+/** 拆解进度 → 远景安静度（VIS-06 v0：只用 hp 推，不引入新色） */
+export function calmOf(hpByTrack) {
+  const tracks = Object.keys(hpByTrack || {});
+  if (!tracks.length) return 0;
+  let sum = 0;
+  let n = 0;
+  for (const t of tracks) {
+    const hp = hpByTrack[t];
+    if (typeof hp !== 'number') continue;
+    sum += Math.max(0, Math.min(1, hp / 4));
+    n++;
+  }
+  return n ? 1 - sum / n : 0;
+}
+
+/**
+ * 边缘节拍脉冲强度（VIS-03 第一项）。拍后瞬间 = 1，按拍长指数衰减 →
+ * 变速关自动跟随，不用固定 ms tween（失败模式 3）。画在 W-14/EffectSystem。
+ */
+export function pulseOf(nowSec, view) {
+  const beatSec = view.beatSec || 0.5;
+  const phase = ((((nowSec % beatSec) + beatSec) % beatSec) / beatSec);
+  return Math.max(0, 1 - phase / (view.pulseDecayBeats || 0.45));
+}
+
+export default WorldLayer;

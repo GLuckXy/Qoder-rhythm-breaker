@@ -317,6 +317,57 @@ CORE 的处理：`JudgeSystem.registerObstacles` 见 `judgable === false` 即**�
 理由：R2 把 L3–L6 与 S-08 落在同一套机制上，上述四处都是「代码已如此、文档未如此」的落差；不登记就会在 R3 被别人按旧文档改写。
 影响面：CORE（`playForEvent` 一处接线，可选；C5 字段仅供 SOUND/WORLD 读）；WORLD（`ghostBeats[].lengthBeats` 是渲染时长来源，若 want 别的单位请在本条批复前说）。
 兼容性：`playSfx(name, opts)` 签名与返回布尔不变；`SFX_CANDIDATES` 8 个名字与候选参数一字未动；无新增依赖、无素材文件。
+结论：**APPROVE（leader 仲裁，2026-11-23）**，四点全部登记为契约事实。
+- 第 1 点：`ghostBeats[] = {beat, offsetBeats?, lengthBeats?}` 升格为 C5 正式字段，`lengthBeats` 由 SOUND 的 gate 锁 1–2 拍。**WORLD 直接以 `lengthBeats` 为渲染时长，不要自己换算秒。**
+- 第 2 点：**批准并要求执行**——`engine.playForEvent(ev)` 是 C7 事件的**唯一音效路由**。CORE 在 `LevelScene`/事件出口只调这一个入口，**禁止在场景里再写一份 `grade → 音效名` 映射**（这正是 CR-08 第 1 点「收敛到唯一入口」的同一条理由）。
+- 第 3 点：**裁决为「变速提示只保留 `TrackMixer.tempoCue(atSec)`」**。SFX 侧的 `tempo` 名字与 `SFX_TRIGGERS` 登记保留但**不接任何事件源**，`CR-08` 新增的 C1 `type:'tempo'` 事件由 WORLD 做视觉预告、由 SOUND 的 metronome 发声，CORE 不再二次触发。理由：同一拍响两次的差异无法靠 `gain≤0.5` 稳定消除，且会让 L4 的听感与 `tempoCues` 断言脱钩。
+- 第 4 点：批准。`revive` / `ui` 无 C7 事件源属设计事实，由调用点直发；`sfxAudit()` + A12 的「新名字未登记触发来源即红」是本项长期护栏，不许放松。
 待确认：CORE（接线点与 gain 口径）、WORLD（`lengthBeats` 是否够用）。
 结论：（待 leader 仲裁）
+
+---
+
+### WORLD 批复 | 批复方：WORLD | 轮次：R1 收尾（2026-11-23）| 涉及：CR-08 / CR-09 / CR-10 / CR-12 里指向 WORLD 的开放问题
+
+1. **CR-08 第 1 点（`emptyBeat`）**：接受 leader 的仲裁——过滤只在 `DisassembleSystem.onJudgment` 做，WORLD **不写第二份「算不算 MISS」的分支**。
+   事实核对：`WorldLayer.applyJudgment` 按 `judgment.obstacleId` 查挂接表，而空拍的 `obstacleId === null` → 天然命中不到任何包裹对象，
+   返回 `false` 且不改实例状态。`tools/screenshotCheck.mjs` 的 render:obstaclePos 组已把这条钉成断言（空拍转发必须是 no-op），R2 接线时若 CORE 改发带 id 的空拍，门禁会红而不是静默多播一次演出。
+2. **CR-08 第 3 点（周期线性）**：**WORLD 明确反对改成 BPM 线性**。本 agent 的障碍 x 全部走拍域
+   （`beatOffsetX(view, beat − clock.beatAt(t))`），实测变速点两侧相邻拍像素差恒为 `pxPerBeat`（Δ≤0.05px），
+   而秒域公式在同一点偏 71.9px≈0.33 拍。视觉预告按仲裁直接读 `getTempoCues()`，不自行推算，也不需要 `tempoProgress`（用到时再提卡）。
+3. **CR-09**：判据统一为 `judgable` 布尔值——WORLD 侧已如此（`isRenderableInstance()` 第一行就是 `judgable === false` 即排除，
+   `track/type === 'bed'` 只是取形状时的兜底，绝不作为「是不是玩家对象」的分流条件）。
+   `pxPerSec` / `beatWidthSec` 不批 = WORLD 的立场：几何唯一由 `physics.js` + 当前视口现算，`render:pxPerBeat` 断言的正是「全场只有一套 pxPerBeat」。
+4. **CR-10 指向 WORLD 的待确认（`arrivalSpacing` 是否满足 W-04/W-05 的列对齐）**：**满足**。
+   `arrivalSpacing(instances, clock) → [{beat, groupIndex, timeSec, widthSec, ids}]` 给了「同组同列」的拍位与拍长，
+   WORLD 用它 + `physics.pxPerSec(view, widthSec)` 画 bed 列与到组线，不再需要实例自带像素量。R2 的 W-05 收尾按此接。
+5. **CR-12 指向 WORLD 的待确认（`ghostBeats[].lengthBeats` 是否够用）**：**够用，且必须是拍数**。
+   W-12 的假节拍标记要「标记跨度 + 故障闪烁时长」都按拍表达（`MOTION` 全是拍系数）；若给秒数，第 4 关变速后标记会与实际拍位脱钩——
+   那正是 WORLD.md 失败模式 3。`ghostMax=8 / ghostGlitchMax=2`（theme.TIMELINE_CFG，L-06 预砍口径）已与 SOUND 的 gate 断言同值。
+
+---
+
+### CR-13 | 提出：WORLD | 轮次：R1 收尾 | 涉及契约：C8 theme.js（「全项目禁止散落颜色字面量」）
+
+需求：请 CORE 把 **4 个文件里的 11 处颜色字面量**改走 `src/data/theme.js` / `src/styles/neon.css` 的 token（WORLD 不动他人文件，T2/C9）：
+
+```
+src/main.js:21,26,34                #00f0ff / #e8ecf4 / #0a0e1a      → COLORS.system.int / var(--rb-ink) / backgroundColor: COLORS.base.int
+src/game/scenes/LevelScene.js:22    #ff4757 / #00f0ff / #e8ecf4      → markerColor('kick') / COLORS.system.int / COLORS.white.int
+src/game/scenes/BootScene.js:57      #e8ecf4                          → COLORS.white.int
+src/game/scenes/TitleScene.js:30     #e8ecf4                          → COLORS.white.int
+src/ui/DebugPanel.js:17-30           #e8ecf4 / rgba(6,10,18,.78) / rgba(232,236,244,.28) → var(--rb-ink) / color-mix(in srgb, var(--rb-panel) 78%, transparent)
+```
+
+理由：`#e8ecf4` 是 C8 六色板之外的**第七种颜色**（PRD 里没有的冷白），一旦被 UI 用熟，R3 的配色终校（W-16）要么全盘跟着改、
+要么留下「界面与画布白得不一样」的裂缝；更重要的是「颜色即信息」这条纪律的说服力取决于**除 theme.js 外全项目 0 处字面量**，
+现在 `tools/screenshotCheck.mjs` 的 render:colors 只能把它记成 SKIP + 待 CR（不是 WORLD 名下的东西我没权改），门禁的威慑力是被削掉的。
+
+影响面：CORE（5 个文件的取值语句，纯替换，无逻辑改动；`src/ui/**` 可直接引用 `neon.css` 的 49 个 `--rb-*` token）；
+SOUND（`src/audio/**` 与关卡 JSON 目前干净，只需长期保持）；WORLD（无改动，扫描器已经就位，改完这行自动从 SKIP 变 PASS）。
+
+兼容性：不改任何签名与语义；`theme.js` 里已有对应导出，不需要新增常量。若 CORE 认为 DebugPanel 的灰底必须比 `--rb-panel` 更暗，
+请在 `theme.js` 的 DERIVED 里加一个登记过的消色差档位（base↔white 轴），而不是在面板里写死 rgba。
+待确认：CORE（是否接受替换；`#e8ecf4` 若要保留，请说明它属于哪个语义角色，WORLD 会把它登记成 `--rb-inkSoft` 并纳入 render:colors 白名单）。
+结论：（由被请求方在此填写 APPROVE / REJECT + 一句理由 + 日期）
 

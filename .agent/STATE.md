@@ -56,7 +56,30 @@ npx eslint <CORE 9 文件> 0 错 0 警；verify:all → contract OK / level OK /
 
 ## WORLD · 本轮变更
 ```
-（待填）
+R1 收尾 + R2 部分。新增 tools/screenshotCheck.mjs（W-02，前任未写）：Node 侧纯函数几何门禁，用「录制用 Graphics」驱动
+生产路径本身（WorldLayer/Timeline/Background/Obstacle/Spike/Platform/Barrage/Player），17 组 305 条断言，无浏览器。
+实跑输出：`node tools/screenshotCheck.mjs` → RESULT: PASS 判定线Δ0px(≤1) 角色x=576 4拍=883.2px（六 BPM 全等）
+pxPerBeatΔ0 灰度 kick:101 bass:213 synth:161（最小对 bass/synth Δ52 ≥ 门限 40）上下层逐实例Δ0px
+真谱面 L1/L2 21条/Δ0px 扫描0命中·17文件 theme=11 css=24 WORLD越界=0 待CR=11 CSS 54 var 分区 86.4/648/345.6px
+quiet档 burst=12 bloom=0 parallax=2 · 305通过/0失败/3SKIP；`node tools/verifyAll.mjs` → 4/4 PASS。--json 可解析，
+--selftest <file|inline|-> 入口已留（schema=world-selftest/v1，已用 Node 伪造负载跑通 11 条断言）。
+门禁抓到的 3 个真缺陷（都不是我新增代码，是前任遗留）：① WorldLayer 私有 laneOf() 与 Obstacle.laneKeyOf() 算出两个值
+（`lv01-kick` vs `1-kick`）→ 跨泳道保护把所有实例拦掉 = **上层世界画不出任何障碍**，真谱面必现；已改为唯一口径 laneKeyOf。
+② theme.buildView 把 beatSec/pxPerSec 各舍入到 2 位 → pxPerSec ≠ pxPerBeat/beatSec（@110BPM 差 0.8%），已给速率量 r6。
+③ QUALITY_CAPS.parallaxLayersMax=4 但层表只有 3 条（降级开关会要一个不存在的层），已对齐成 3。
+补齐 R2 三张卡：objects/Platform.js（W-09：三档 y 直接取 physics.FROZEN.platformTiers，与 CORE 的 platformTopY 同值
+Δ≤0.6px；核心落点 = judgeX；可达包络 6 档 BPM 全过）；objects/Barrage.js（W-10：间隙 = 2.2×角色高，行的排布在世界带内，
+网最低边高过站立角色头顶 →「站着碰不到」成立；speedForDur 与 SOUND 的 durToSpeed 逐值相等，不另立映射）；
+objects/Player.js（W-03：fixedX ≡ judgeX，跳跃用 physics 冻结的 v0=4h/T、g=8h/T² 现算高度，冲刺表现位移首尾为 0，
+微调三档候选；全部 (nowSec − 动作起始秒) 的纯函数）。WorldLayer 挂接表补 platform/barrage，并新增 applyAction/
+snapshot.player（CORE 只需在 sync 的 extra 里传 action:{kind,atSec}）。worldYFor('bass') 改为按档位取板顶面
+（原先自插一条「跳跃带」中间值，与 CORE 的 platformTiers 是两套数，W-09 会分叉）。
+neon.css 从 7 行占位重写为 token 层：49 个 --rb-* 与 theme.cssTokens() 逐值同源 + 5 个别名（清单见 rounds 报告），
+CORE 界面层所需 15 个 token（分区/比例/字号/声部标记/quality）齐备；render:colors 逐条比对，改 theme 不改 css 会红。
+CR：已批复 CR-08（emptyBeat 在 WORLD 侧天然 no-op，已写进门禁）与 CR-09/C10/C12 里指向 WORLD 的开放问题；
+新提 CR-13（CORE 名下 11 处颜色字面量含第七色 #e8ecf4，请改走 token）。
+未做：W-07 EffectSystem（门禁对该组是 SKIP 并点名）、W-06 对齐虚线只做了 alignDashAlpha 断言、bed 层按
+arrivalSpacing 画进时间轴带（CR-10 批复后待接）。全文见 .agent/rounds/R1-WORLD.md。未跑 git、未 npm install。
 ```
 
 ## SOUND · 本轮变更
@@ -128,4 +151,8 @@ CR-10（SOUND→WORLD/CORE）：C5 追加 noteEvents.bed、tracks.bed{disassembl
 CR-11（SOUND→CORE）：C6 的 tempoCue() 签名改为 tempoCue(atSec:number, secondAtSec?)（无参 = bug：warn 一次返回 false）；
   SoundEngine.js 补进 C9 所有权矩阵；CORE 需接三处（每帧 ensureRunning / 首次手势 unlockOnFirstGesture / 关卡起 loadLevel+arm）。
 CR-08 / CR-09（CORE 提出）：SOUND 侧已按批复落地（见上），结论行仍空，请 CORE/WORLD 补填 APPROVE。
+  → WORLD 侧已补：CR-08/CR-09 结论行已填 + CONTRACTS 末尾「WORLD 批复」段（含 CR-10 arrivalSpacing 满足、CR-12 lengthBeats 够用）。
+CR-13（WORLD→CORE，R1 收尾新增）：CORE 名下 11 处颜色字面量（main.js / LevelScene / BootScene / TitleScene / DebugPanel，
+  含第七色 #e8ecf4）请改走 theme.js 取值或 neon.css 的 --rb-* token；WORLD 无权改他人文件，screenshotCheck 目前只能记 SKIP+待CR。
+  若 CORE 要保留 #e8ecf4，请说明语义角色，WORLD 登记为 --rb-inkSoft 并纳入白名单。
 ```
