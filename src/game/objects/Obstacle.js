@@ -88,7 +88,7 @@ export function isBedInstance(inst) {
 
 /** id → 解析（两种口径都吃：`lv2-kick-008` 与 SOUND 现行的 `2-kick-8`，见 CR-11）。 */
 export function parseObstacleId(id) {
-  const m = /^lv?(\d+)-(kick|bass|synth)-(\d+)$/i.exec(String(id || ''));
+  const m = /^(?:lv)?(\d+)-(kick|bass|synth)-(\d+)$/i.exec(String(id || ''));
   if (!m) return null;
   return { level: +m[1], track: m[2], index: +m[3] };
 }

@@ -686,3 +686,37 @@ W-13 的教学浮层在制品 `src/game/render/OverlayLayer.js:120-136`（`build
 
 不阻断本轮集成：浮层机制本身（按拍推进、可跳过、不遮判定线）是对的，问题只在文案通道。
 但 D9 那条「链接发给朋友，对方无需指导即可玩」在它修好之前不能算过。
+
+---
+
+## CR-17 · `^lv?` 这个正则一直吃掉的是「l」不是「lv」（2026-11-23，leader）
+
+`src/game/objects/Obstacle.js:91` 与我自己新写的 `tools/playtestReport.mjs` 都用了 `/^lv?(\d+)-…/`。
+`lv?` 的语义是 **`l` 必需、`v` 可选**，所以 SOUND 现行的 `2-kick-8` 这种纯数字 id 一个都不匹配，
+只有 `lv2-kick-008` 才进得来。docstring 写着「两种口径都吃」，代码只吃一种。
+
+真影响（不是纸面问题）：`laneKeyOf`（`:100`）在解析失败时把 laneKey 退化成 `x-kick`，
+跨关的泳道互斥因此全部并到同一条 key 上——第 2 关和第 5 关的同声部障碍被当成同一条泳道。
+另外 T22 归因的 ③（按声部）和 ④（按关卡取谱面上下文）在没有 `beat` 之前完全靠 id 反推关卡，
+这个正则一挂，两路都是假阴性（`trackGap` 为 NaN，`ctxByLevel.get(null)` 取不到上下文）。
+
+发现方式：`node tools/playtestReport.mjs --selftest` 里 ③④ 两支断言红。这是自测存在的意义——
+它抓的是**我自己的**工具与它照抄的口径，不是代理指标。
+
+处置：两处正则改为 `/^(?:lv)?(\d+)-…/`。`tools/screenshotCheck.mjs:632` 内嵌的
+`/^lv?([A-Ga-g])([#b]?)(-?\d)$/` 属 WORLD 的文件（音名 id，另一套口径），本轮不动，
+只在此登记：W-18/S-08 落地时一并核对它是否也想「两种口径都吃」。
+
+## CR-18 · T22 第 ④ 路（变速聚集）现在没有可用的输入，缺的是遥测字段不是解释（2026-11-23，leader→CORE）
+
+`JudgeSystem` 落库的 judge 事件是 `{ t, kind, grade, id, deltaMs, rule }`（`src/game/systems/JudgeSystem.js:59`）。
+`t` 是**时钟绝对秒**（`clock.now()` 口径），里面含 `_originSec`；而 `_originSec` 是运行时量（起播提前量、intro 长度），
+离线拿着 `levelN.json` 恢复不出来。所以「这条偏差是否发生在变速点 ±2 拍内」目前**无法判定**。
+用 `cfg.bpm` 把秒除回拍是错的（变速段的拍长本来就在变）；用最小 `t` 当原点也是错的（没有依据）。
+
+按 T21 取保守：`tools/playtestReport.mjs` 的 ④ 在没有 `beat` 字段时输出 `⚠无口径`，
+`hit=false` 且 `na=true`，动作行直接指向本 CR——**不许把「没数据」写成「没问题」**。
+
+要求（T5 只增字段，不动既有字段）：CORE 在 judge 事件补 `beat`（判定所用障碍的目标拍序，浮点也行）。
+补上之后 ④ 立刻可用，`playtestReport --selftest` 里已经有两支断言分别覆盖「有 beat 命中」和
+「缺 beat 报无口径」，不需要再改工具。登记为 K-19 的前置：分布报告的变速那一栏在字段补齐前只能是 `SKIP`。
