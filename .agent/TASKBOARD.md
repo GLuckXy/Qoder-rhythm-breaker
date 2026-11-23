@@ -60,7 +60,7 @@
 | W-07 | 拆解演出 v1：在场障碍全屏碎裂 + 降饱和 0.3s + 大字标题，三要素同帧 | K-07 | systems/EffectSystem.js, objects/Obstacle.js | `render:disassemble` + `🚩15s GIF` | ready |
 | W-08 | 复活表现：该类障碍自当前拍后恢复、不补发、hp 显示回 1 | K-07 | systems/EffectSystem.js, objects/*.js | `render:revive` | ready |
 | S-07 | 段落进入（`sections.layers`）+ 静音/复活音频侧接线 + 拆解后响度层次 | K-07 | audio/TrackMixer.js | `audio:sections` | ready |
-| S-08 | Sfx 全套 v1：PERFECT/GOOD/MISS/碎裂/复活/UI/变速提示/终点踩灭 | S-01 | audio/Sfx.js | `audio:sfx` | ready |
+| S-08 | Sfx 全套 v1：PERFECT/GOOD/MISS/碎裂/复活/UI/变速提示/终点踩灭 | S-01 | audio/Sfx.js | `audio:sfx` | active·rework·派 CORE/SOUND |
 | S-09 | L2 谱面与编曲（鼓+贝斯，音高→三档平台） | S-04 | data/levels/level2.json | `level:lv2` | ready |
 
 ---
@@ -87,7 +87,7 @@
 | K-11 | 寂静段（光点逐拍踩灭）+ 终点演出 + `SILENCE` 段内 MISS 不复活 + `DISASSEMBLED→PEAK` 世界重建 | K-07 | systems/DisassembleSystem.js, scenes/LevelScene.js | `contract:silence` | ready |
 | K-12 | L6 `freeOrder`：三声部核心同时常驻可交互，顺序不影响段落进入 | K-07 | systems/DisassembleSystem.js | `contract:freeorder` | ready |
 | W-12 | 变速下时间轴按拍等距 + 假节拍渲染层（偏移标记 + 故障闪烁，**不污染判定与音频**） | W-05 | objects/Timeline.js | `render:ghost` | ready |
-| W-13 | 教学浮层渲染（前 8 拍 3 步、可跳过、不遮挡判定线） | W-01 | render/OverlayLayer.js | `render:overlay` + `🚩20 拍内首次 PERFECT` | ready |
+| W-13 | 教学浮层渲染（前 8 拍 3 步、可跳过、不遮挡判定线） | W-01 | render/OverlayLayer.js | `render:overlay` + `🚩20 拍内首次 PERFECT` | active·派 WORLD |
 | S-13 | L4 变速谱面与编曲（`tempoChanges` 120→140，2 拍过渡提示，密度 2.5） | S-10 | data/levels/level4.json | `level:lv4` + `contract:tempo` | ready |
 | S-14 | L5 谱面与编曲（Glitch，`ghostBeats` ≤8 处且不落核心拍） | S-10 | data/levels/level5.json | `level:lv5` | ready |
 | S-15 | L6 谱面与编曲（完整编曲，密度 3.0，单声部核心 ≥6 个容错） | S-10 | data/levels/level6.json | `level:lv6` | ready |
@@ -102,7 +102,7 @@
 | 卡 | 内容 | 依赖 | writes | verify | 状态 |
 |---|---|---|---|---|---|
 | K-13 | 五界面：标题（点击 = AudioContext resume）/ 选关（徽章 + Perfect 率）/ 暂停（调 `clock.pause`）/ 设置 / 结算 | K-05, K-08 | ui/screens/*.js | `build` + `render:screens` + `🚩T11` | ready |
-| K-14 | 校准（小游戏取中位数，或降级版仅 `[ ]` 微调 + 当前值显示）+ 设置项持久化 | K-08 | ui/Calibration.js, data/config.js | `contract:latency` | ready |
+| K-14 | 校准（小游戏取中位数，或降级版仅 `[ ]` 微调 + 当前值显示）+ 设置项持久化 | K-08 | ui/Calibration.js, data/config.js | `contract:latency` | active·派 CORE/SOUND·完整版 |
 | K-15 | 教学触发与全流程串接 + 跳转图核对（标题→L1→…→L6→结算→下一关） | K-13 | ui/Popup.js, scenes/LevelScene.js | `🚩无断点走查` | ready |
 | W-14 | 上层世界 polish：2 层视差、边缘脉冲、地面线质感、分关色温（消费 S-12 的 CR） | S-12 | render/Background.js, systems/EffectSystem.js, data/theme.js | `render:perlevel` | ready |
 | S-17 | 音量三通道（主/音乐/音效）+ 六关混音终版（轨间差 ≤3dB） | S-07 | audio/TrackMixer.js | `audio:loudness` | ready |
