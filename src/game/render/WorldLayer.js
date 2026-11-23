@@ -27,7 +27,7 @@
 //
 // 注意：**不 import Phaser**。绘制容器由 host.add.graphics() 提供，本文件只调它的方法。
 
-import { buildView, isView, resolveView, COLORS } from '../../data/theme.js';
+import { a11yOf, buildView, isView, resolveView, COLORS } from '../../data/theme.js';
 import { Background } from './Background.js';
 import EffectSystem from '../systems/EffectSystem.js';
 import Spike from '../objects/Spike.js';
@@ -64,6 +64,7 @@ export class WorldLayer {
     /** 拆解态声部：该类的终态实例不再画（DIS-04/07） */
     this.disassembledTracks = new Set();
     this.calm = 0; // 0..1 远景安静度（VIS-06）
+    this.combo = 0; // DIS-09：连击数（UI-04 的金边档），CORE 每帧通过 extra.combo 传入
     this.g = { bg: null, obstacles: null, player: null, fx: null };
     /** 角色（W-03）：opts.player === false 时不建（CORE 想自绘时） */
     this.player = opts.player === false ? null : new Player(opts.player || {});
@@ -158,6 +159,8 @@ export class WorldLayer {
     if (extra.hpByTrack) this.calm = calmOf(extra.hpByTrack);
     if (Array.isArray(extra.disassembledTracks)) this._syncDisassembled(extra.disassembledTracks, nowSec, view);
     if (this.player) this.applyAction(extra.action, nowSec, view);
+    // ★ DIS-09 的连击数（UI-04 的金边档）：CORE 的 ds.counts().combo 原样传入，WORLD 只消费不持有真相。
+    if (typeof extra.combo === 'number') this.combo = extra.combo;
 
     this._reconcile(instances, nowSec, view);
     if (extra.judgment) this.applyJudgment(extra.judgment, nowSec);
@@ -246,7 +249,7 @@ export class WorldLayer {
   }
 
   _render(nowSec, view, instances) {
-    if (this.g.bg) this.background.draw(this.g.bg, { view, nowSec, calm: this.calm, pulse: pulseOf(nowSec, view) });
+    if (this.g.bg) this.background.draw(this.g.bg, { view, nowSec, calm: this.calm, pulse: pulseOf(nowSec, view), combo: this.combo });
     const g = this.g.obstacles;
     if (!g) {
       this._renderFx(nowSec, view);
@@ -274,7 +277,8 @@ export class WorldLayer {
       pxPerBeat: view.pxPerBeat,
       spawnX: worldSpawnX(view),
       playerX: this.player ? this.player.screen.x : fixedX(view),
-      playerState: this.player ? this.player.screen.state : 'run'
+      playerState: this.player ? this.player.screen.state : 'run',
+      combo: this.combo
     };
     const fxDrawn = this._renderFx(nowSec, view);
     this.frameStats.fx = fxDrawn;
@@ -289,6 +293,10 @@ export class WorldLayer {
   _renderFx(nowSec, view) {
     const out = { ops: 0, live: 0, bigText: null, shake: 0 };
     if (!this.ready || !this.effects) return out;
+    // PERF-05③：削减系数先落到本实例的 preset 副本上（EffectSystem 每帧读它自己的 q），
+    // 再走原有 draw 路径 —— 不改 EffectSystem 一行，也不污染 theme.QUALITY_PRESETS 那张公共表。
+    const a = a11yOf(view);
+    this._applyFlashScale(a.flash);
     const g = this.g.fx;
     const st = this.effects.stateAt(nowSec, view);
     if (g) {
@@ -309,7 +317,9 @@ export class WorldLayer {
       out.bigText = on ? { text: st.bigText.text, alpha: st.bigText.alpha, scale: st.bigText.scale, startSec: st.bigText.startSec } : null;
     }
     const sh = st.shake;
-    const mag = sh && !sh.done && sh.amp > 0 ? sh : null;
+    // PERF-05③：震屏是位移型闪烁（preset 的 shakeMaxPx 已被 ×0，这里再乘一次是为了
+    // 即便有人另建 EffectSystem 桩、或审美档被换掉，本层也绝不因为一个开关而晃屏）。
+    const mag = sh && !sh.done && sh.amp > 0 && a.flash.shake > 0 ? sh : null;
     const dx = mag ? Math.max(-view.width * 0.02, Math.min(view.width * 0.02, mag.x)) : 0;
     const dy = mag ? Math.max(-view.height * 0.02, Math.min(view.height * 0.02, mag.y)) : 0;
     for (const key of Object.keys(this.g)) {
@@ -321,6 +331,35 @@ export class WorldLayer {
     out.shake = mag ? Math.hypot(dx, dy) : 0;
     out.state = st;
     return out;
+  }
+
+  /**
+   * PERF-05③：把「降低闪烁」的系数写进 **EffectSystem 实例自己的 preset 副本**（`this.q`）。
+   * 这些都是 preset 已有的入口字段（vignetteAlpha / bloomIntensity / bloomLayers / shakeMaxPx /
+   * flashReductionSafe），所以不必改 EffectSystem 一行，也不必往公共的 QUALITY_PRESETS 里塞状态。
+   * 基线值第一次抓下来存着、系数每次从基线重算 ⇒ 中途开关 N 次不会叠乘漂移；
+   * 档名一变（W-16 降级 / setQuality）自动重抓。
+   * @param {typeof import('../../data/theme.js').FLASH_REDUCTION} f
+   */
+  _applyFlashScale(f) {
+    const q = this.effects && typeof this.effects.preset === 'function' ? this.effects.preset() : null;
+    if (!q) return false;
+    if (!this._qBase || this._qBase.name !== q.name) {
+      this._qBase = {
+        name: q.name,
+        vignetteAlpha: q.vignetteAlpha,
+        bloomIntensity: q.bloomIntensity,
+        bloomLayers: q.bloomLayers,
+        shakeMaxPx: q.shakeMaxPx,
+        flashReductionSafe: q.flashReductionSafe
+      };
+    }
+    q.vignetteAlpha = Math.round(this._qBase.vignetteAlpha * f.vignetteAlpha * 1e6) / 1e6;
+    q.bloomIntensity = this._qBase.bloomIntensity * f.bloom;
+    q.bloomLayers = Math.round(this._qBase.bloomLayers * f.bloom);
+    q.shakeMaxPx = this._qBase.shakeMaxPx * f.shake;
+    q.flashReductionSafe = f.forceSafeScale ? true : this._qBase.flashReductionSafe;
+    return true;
   }
 
   /**

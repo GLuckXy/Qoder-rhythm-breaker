@@ -749,3 +749,219 @@ W-13 的教学浮层在制品 `src/game/render/OverlayLayer.js:120-136`（`build
 **同批登记的实现缺陷由 W-13/K-14 两个 agent 撞上限截断遗留**，leader 收尾时只修到门禁绿；
 剩下的记成卡不代改：K-20（静音时校准仍记为「已听」）、K-21（面板可用性是构造时快照）、
 K-22（judge 事件缺 `beat`，即 CR-18）、K-23（JDG-09 的 8 拍中位数被实现成丢 warmup 后 6 拍）。
+
+---
+
+### CR-20 | 提出：leader | 轮次：R13 | 涉及契约：JDG-09 验收 / `contract [latency]` | 状态：**已闭环（断言已进门禁）**
+
+R12 收尾时按需求条目反查门禁覆盖，发现 **JDG-09 的验收口径本身一条断言都没有**：
+PRD `docs/节奏拆解台-需求文档PRD.md:185` 写的是「校准 0ms 与人为 +60ms 两次结果，Perfect 率差 < 3%」，
+而 `caseLatency()` 的六组断言全部在验「中位数/热身/夹紧/落盘」这些**实现细节**，没有一条回到
+「校准之后玩家是不是真的变准了」。一个只验内部计算、不验验收口径的门禁，等于把需求交给自己出题。
+
+**这句话的读法先钉死（不钉死就会写出互相矛盾的断言）**：
+- 读法 A「同一批输入，offset=0 与 offset=+60 的 Perfect 率差 < 3%」= 断言 `latencyOffset` **没有作用**，
+  与 ⑤ 的符号口径（写 80ms 后 deltaMs 从 +80 回到 0）直接矛盾。不编码。
+- 读法 B「一个系统性晚 60ms 的人，走完校准之后 Perfect 率要和不带偏差的基准玩家持平（差 < 3pp）」——
+  这才是「校准有用」的定义，也是 PRD 把它放在验收列的原意。编码的是 B。
+
+新增 ⑦ 组（4 条）：基准玩家 100%、+60ms 玩家校准后 100%（差 0.0pp）、补偿量由 `summarize()` 自己算出来
+（实测 62.5ms = 60 + 抖动中位数 2.5，不是手写常量），并**反向钉一条防假绿**：同一批偏晚输入不校准时
+必须差 > 3pp。少了这条，⑦ 在「offset 被忽略」的实现下也会绿——门禁必须能区分「修好了」和「没生效」。
+
+用变异法确认断言真的在跑：把阈值临时改成 `< -1`，⑦ 立刻红并打印「基准 100.0% vs 校准后 100.0% → 差 0.0pp」，
+改回即绿。只加不减，`contract` 933 → 944。
+
+**顺带修掉一处口径污染（K-23 结案）**：`contractTest.mjs` 原来写着
+`eq('latency: 参数按 JDG-09 原文：打 8 下、丢 2 下热身', '8/2')`——原文只有「8 拍跟拍敲击，取中位数」，
+「丢 2 下热身」是实现补充。让门禁自称「原文」，等于把实现决定写成需求，下一轮谁都不可能再质疑它。
+文案改为「打 8 下（JDG-09 原文如此）+ 丢 2 下热身（实现补充，原文只写了取中位数）」。
+
+---
+
+### CR-21 | 提出：leader（浏览器实测撞出来的） | 轮次：R13 | 涉及契约：SAV-01/SAV-02 / `LevelRuntime._writeSave` | 状态：**已修，待浏览器复验**
+
+R12 的 L2–L5 全量实测里，**L4 是唯一一条 `存档 levels=NO_SAVE`**：`ds.state()` 已经是 RESULT、结算面板文案
+完整、0 条 console 错误，但磁盘上没有存档。L2/L3/L5 同一段脚本、同一个读回时机都有档。
+
+根因不在存档逻辑，在**写入时机的口径**：`updateSave()` 默认走 `WRITE_THROTTLE_MS = 500` 的节流窗
+（`src/data/save.js:17`），结算写档也搭这趟车（`LevelRuntime._writeSave` 没传 opts）。于是「结算出现」
+与「存档落盘」之间最多差 500ms——L4 那一轮探针正好落在这 500ms 里，就读到了空。
+换句话说 **NO_SAVE 不是 L4 专属缺陷，是任何一关在任何一次「结算后 500ms 内关页」都会重现的真丢档**，
+只是被探针的时序抖动偶然暴露了一次。这也说明节流对「测试可读回」本身就是隐患。
+
+PRD 的口径其实早就写明了，两条对着读没有歧义：
+- `SAV-02`（`:288`）把节流限定在「音量变更（节流 ≥ 500ms）」，同时把「结算完成」单列为写入时机；
+- 结算界面那一行（`:559`）写的是「**写档在结算出现时完成**（SAV-02）」。
+
+处置（都在 CORE 自有文件内，不动 T2 归属）：
+1. `LevelRuntime._writeSave` 传 `{ throttleMs: 0 }`：终态一次性写入立即落盘；音量拖动仍走节流
+   （门禁反向钉了一条「applyVolumes 不许出现 throttleMs:0」，防止下一轮顺手把所有写口都改成即时，
+   把 SAV-02 的「禁止每帧写」改坏了）。
+2. 新增 `save.flushOnHide()`（`pagehide` + `visibilitychange:hidden` 双绑，移动端切后台只发后者），
+   `main.js` 浏览器入口调一次：节流窗口里的音量/微调写入不再随关页丢失。Node 无 window 时返回 false，
+   门禁里用注入桩验证注册了 2 个 handler、重复绑定被拒、触发后磁盘读到 0.42 且只写 1 次。
+
+**教训写在这里而不是只写在 commit 里**：把「成绩持久化」这类终态写入挂到为 UI 拖动设计的节流器上，
+在单测里永远看不出来——单测要么显式 `flushSave()`（本项目 `:2428` 就是这么过的），要么等 500ms。
+只有真浏览器 + 真时序才会撞出来。门禁绿不等于需求满足，这条是 R13 反查覆盖率的直接产物。
+
+---
+
+### CR-22 | 提出：leader | 轮次：R13 | 涉及契约：SAV-01/SAV-03 / `data/save.js` 写入前置条件 | 状态：**已修 + 已进门禁（变异法自证）**
+
+CR-21 追查 L4 `NO_SAVE` 时写了 `.agent/e2e/storageProbe.mjs` 量存储本身，撞出一个比节流严重得多的东西：
+
+```
+== 1) 导航前的空白页        threw: SecurityError: Access is denied for this document
+== 2) 载入游戏 127.0.0.1:4174 writable: true, readback: "v1"      ← 同一个浏览器，1.5s 后就能写了
+== 3) [warning] url=ctx#2（游戏自己的默认上下文，不是 iframe） :: [save] localStorage 不可用（隐私模式或 iframe 分区）
+```
+
+也就是说：**首帧访问 `localStorage` 抛 SecurityError、随后恢复正常**，而 `save.js` 把这一次失败
+永久 latch 成「内存档」。看代码，覆盖路径是现成的：
+
+1. `loadSave()` 读不到 → `current = defaultSave()`（**玩家的真档还在磁盘上，内存里却换成了空档**）；
+2. `updateSave()` 里 `if (opts.storage !== undefined || boundStorage === null) boundStorage = pickStorage(...)`
+   —— `boundStorage` 一直是 `null`，所以下一次写入会**重新绑定**，这次绑定是成功的；
+3. 于是 `flushSave()` 把第 1 步那份「默认档 + 本关成绩」`setItem` 上去 → **整份覆盖，历史关卡全没**。
+
+R12 的 L2/L3/L5 恰恰是这条路径的「成功版」：它们能读到 `存档 levels={"2":…}`，说明存储确实是先拒后通、
+后来写进去了——**同一批证据一边证明持久化工作、一边证明覆盖在发生**，只是没人去查老关卡字段。
+（L4 的 NO_SAVE 是节流那条，见 CR-21；两条根因不同，都要修。）
+
+这在 itch.io 场景不是假想敌：PRD `:619` 自己写了「itch.io iframe 键名不变但域为 `itch.io`（分区）」，
+分区/隐私策略下「访问时好时坏」正是预期环境，而 `SAV-03` 只规定「静默降级不崩」，没授权我们把玩家进度写没。
+
+修法（只动 `src/data/save.js`，CORE 自有文件）：
+- 新增 `blind` 态：**读不到存储期间收到的 patch 一律记账、不落盘**；
+- 存储恢复后：先以磁盘为准 `loadSave()`，再把盲期内的 patch **按序重放**，最后才落这一笔
+  （重放期间 `replaying` 拦住 `flushSave`，所以整段只写 1 次盘）；
+- 写得进去就把 `degraded/notice` 收回——存储明明可用却持续提示「本次会话使用内存档」是假话；
+  真·隐私模式（始终抛）路径不受影响，仍静默降级（门禁里单独钉了一条）。
+- 顺带补 CR-21 的漏：`throttleMs: 0` 原来排在 `if (timer !== null) return` 之后，
+  音量拖动起过定时器之后，结算写入还是会等那个 500ms。改成先取消待发定时器再立即落盘。
+
+门禁新增 14 条（`contract` 944 → **958**）。**变异法自证**：把恢复分支临时改成 `if (false && …)`，
+`save` case 立刻红在 `after.levels['1']` 上——正是「第 1 关成绩被冲掉」这个数据丢失本身；
+还原后 67/67 绿。断言只加不减。
+
+**这条要留在契约里而不只是 commit message**：一个「防御性地把异常吞掉并降级」的实现，
+如果降级之后还允许写，就比不降级更危险。以后凡是「读失败 → 用默认值」的模块（存档、关卡 JSON、
+音色表），写回前都必须先回答「我到底读到过没有」。
+
+---
+
+## CR-23 · 校准的「静音盲拍」和「一次性可用性快照」（2026-11-23，leader，K-20 / K-21）
+
+R13 的 PRD↔门禁复审（`.agent/tmp/prdAudit*`）追问了一句很朴素的话：**玩家把主音量拉到 0 之后点「开始校准」，会发生什么？**
+
+答案是原来会发生的：节拍器照样排程、照样 `playClick`，只是**玩家听不见**——然后系统拿他凭空气拍的 8 个样本算中位数写进 `latencyOffset`。这不是假想敌，是路由决定的：
+
+```
+src/audio/TrackMixer.js:200-208  构造里 MIXER_TRACKS 每一条 bus（含 'click'）都 g.connect(→p.connect)(this.music)
+src/audio/TrackMixer.js:283      muted['click'] 结构上恒为 false（load 里 `track !== 'click' && …`）
+```
+
+即 click 子总线接在 `music → master` **之后**，所以 `master === 0` 或 `music === 0` 时节拍器"出声但听不见"；`muted.click` 这个信号在这个项目里根本不存在，唯一可靠的「听不见」判据是音量本身。
+
+- `src/ui/Calibration.js` 的 `calibrationAvailability` 在 `locked` 与 `paused` 之间新增 `silent` 分支（`code:'silent'`，reason 里同时报 master/music 两个数），JDG-09 的手动 ±1ms 微调仍然可用——**它不需要听得见**。
+- **K-21**：`createCalibrationPanel` 原来把 `availability` 当对象读一次就冻结。`UiLayer.showCalibration` 在「静音 → 打开面板」这条路上给的快照，到玩家滑回音量再点开始时早已过期。现在统一成 reader：`typeof opt.availability === 'function' ? opt.availability : () => opt.availability`，`start()` 与 `render()` 各刷新一次，`UiLayer` 侧改成传 thunk（`availability: () => calibrationAvailability(deps.engine, runtime() ? {paused} : null)`）。
+
+门禁：`latency` case 129 → **141**（`silent` 于 master=0、silent 于 music=0、低但非零音量仍 `ok`、旧 stub 无 `volumes` 字段仍不报假话、reason 列表 `[noEngine, locked, paused, susp, muteMaster, muteMusic]` 逐条对齐，另加 K-21 的「静音开面板 → 拉回音量 → start 真的起播」行为探针 + `UiLayer.js` 源码形状守卫 `/availability:\s*\(\)\s*=>/`）。断言只加不减。
+
+## CR-24 · SAV-01 的「最高评级」以前是假的：`mergeSave` 的 best-of 分支不可达（2026-11-23，leader，DEF-09）
+
+PRD `:287` SAV-01 白纸黑字要求持久化「通关/最高评级/最高 Perfect 率/最高连击」。旧实现里 `mergeSave` 确实写了 best-of，但它拿到的两个对象是**同一个引用**：
+
+```js
+const mutated = patch(deepMerge(base, {}));   // ← 旧
+const merged  = mergeSave(deepMerge(base, next));
+```
+
+`deepMerge` 的递归只遍历 `source` 的键，`source` 为 `{}` 时它就是个**浅拷贝**——于是变异函数（`updateSave(fn)` 的 fn）改「克隆体」等于直接改基线，best-of 的比较对象自己变了。净效果：一局差局把 `rank` 从 S 冲成 B，**历史最高评级永久丢失**，而 `save` case 当时完全没覆盖这一条。
+
+修法（`src/data/save.js`）：
+- 变异路径改为 `deepMerge(base, base)`（真深拷贝），并加源码守卫 `/patch\(deepMerge\(base, base\)\)/` 防止有人再"简化"回去；
+- 新增 `mergeLevelPair(prev, entry)` + `levelsBestOf(base, next)`：写回前逐关 best-of（`cleared ||`、`bestRank`、`max(perfectRate)`、`max(maxCombo)`、`encounterRate` 取 max、`miss` 取最近一次），`writeSave` 的整档替换入口语义不变（门禁逐字节比过）。
+
+门禁：`save` case 67 → **78**（差局不冲档、好局升档、`miss` 取最近、磁盘读回是 S、`totalRuns` 仍 +1、原地变异子字段不污染基线、新开第 2 关不受影响、`writeSave` 整档替换仍是替换）。
+
+**教训写在这里**：「best-of 写在 merge 里」不等于「best-of 生效」。凡是拿克隆体做比较的实现，先证明克隆体真的独立。
+
+## CR-25 · §7.2 状态矩阵那一格早就写对了，代码一直写反：MISS 是「其他损失最大声部 +1」，不是「置为 1」（2026-11-23，leader→CORE，B-1）
+
+`docs/节奏拆解台-需求文档PRD.md:342` 的 MISS 行：
+
+| 事件 | 连击 | hp（该声部） | 音轨 |
+|---|---|---|---|
+| MISS（声部未全满） | 0 | **其他**损失最大声部 +1（≤4） | 复活淡入 |
+| MISS（全声部 hp=4） | 0 | 不变 | 不变 |
+
+旧 `onMiss` 干的是 `this._hp[pick] = REVIVE_HP(=1)`，两处都反了：
+1. **增量错**：hp=2 的声部被 MISS 打到 **1**——惩罚反而送玩家一格拆解进度，与 DIS-02「PERFECT → hp−1」的单调性直接矛盾（遭遇口径和核心命中率因此虚高）；
+2. **候选域错**：没排除刚 MISS 的那条，越打不烂的声部越优先回血。
+   DIS-05 的「hp 回到 1（不是 4）」是 **hp=0 那条** 的 `min(4, 0+1)` 实例，不是通用赋值——这个特例被当成了通则。
+
+CORE 的修复（`src/game/systems/DisassembleSystem.js:294-360`，+35/−8）：候选域收窄到「在场且受损（hp<hpMax）」、踢掉 `opt.track`、`after = min(hpMax, before+1)`；R5 的「只在真的改变了什么时才发事件」保险与 DISASSEMBLED→PEAK 回退边原样保留；调用侧没动（`onJudgment` 早已转发 `track`，超时 MISS 在 `JudgeSystem.js:519` 带 `o.track`）。
+
+**两处歧义由 leader 裁决，记在这里免得下次再吵**：
+- DIS-03:217 说「损失点数最多的声部」，§7.2:342 说「**其他**损失最大声部」——按 §7.2 为准（它就是这个主题的矩阵格）。
+- 「其他」集合为空（唯一受损声部就是刚 MISS 的那条，L1 这种单声部关是常态）时**回落到它自己 +1**。字面 §7.2 在这里应得出「不变」（+1 夹到 ≤4），回落口径的依据是 DIS-02:216「MISS → 复活 1 点」与 T21（相对已发布行为取最小改动：旧代码同样补的是自己）。这格若再被改动，请先改本条。
+
+门禁：`revive-tie` 50 → **62**（新增 ②b 段：打在 kick 上补的是 bass 且 bass 3→4 而 kick 不动、「其他」为空时回落仍走 +1 不是 4、打在满血声部上把已拆空的 synth 拉回 1、MISS 永不让 hp 下降、并列取 bass 后 bass/synth 的分别值）。
+**变异法自证**：把 `cand = others.length ? others : damaged` 临时改成 `cand = damaged`，门禁立刻红在 ②b 两条上（期望 bass 实际 kick、期望 4/2 实际 3/3）；还原后 1000/1000 绿。
+
+**旧断言的处理**：`:1475` 与 `:1489` 原来钉的是 `hp === 1`，标签本身写着「复活后 hp → 1（不是满 hp，DIS-05）」——钉住的正是 bug。按"与 PRD 冲突的断言可替换、须在契约里说明"的纪律改成 `2→3` / `2→3` 并各补一条差值断言；DIS-05 的 0→1 由 ④ 段与 ②b 的 synth 拆空格继续守。
+
+**def04③ 的场景重写**（策略改了，不是数字改了）：旧策略「只打 4 个核心鼓点、其余全放过」在新规则下**不可能拆空 kick**——kick 是唯一受损声部时每一次 bass MISS 都把它补回一格。新策略 `o.beat <= 48` 全打中、之后全放过：48 是 kick 第 4 个核心节点，拆鼓时后面还剩 21 个 kick 事件，之后的 bass MISS 于是真的下发原件 id（`revive=4 ids=0` → ids>0）。前置断言从「数了几个核心输入」升级为「真的发出过一次 kick 拆解事件」。
+
+**遗留（未验，别当已完）**：复活口径变严后，§7.3 评级分布与 T22 手感归因都会漂移；CORE 明确说它没有浏览器证据。R13c 要在 L2/L3 各跑一次实况复验。
+
+---
+
+## CR-26 · 三条「钉住 bug / 钉住实现」的断言被换掉，另记一笔没做的（2026-11-23，leader，B-3 / B-4 / UI-03）
+
+**B-3｜LVL-03 要求「改 JSON 不改代码，刷新即生效」，门禁当时要求的恰好相反。** `integration` case 里有一条
+`eq('integration: L${id} windowScale 与关卡表一致', …)` 把同一个数在 JSON、常量表、运行时三处**三重对撞**——
+关卡表若真被现场改动，这条只会红，等于把 LVL-03 的验收口径钉成了"不许改"。
+处理（按纪律：与 PRD 冲突的断言可替换，但必须在这里写清依据）：三重对撞换成「带区间的一致性 + 漂移时 `note()` 说话」，
+并在 `ignoredCount` 之后加**行为探针**：把 `windowScale` 临时改成 0.5 重装配一次，断言 `judge.windows().perfectMs` 真的随之收窄。
+断言条数不减（integration 仍 127/127），门禁从"证明三处抄得一样"变成"证明改一处真的生效"。
+
+**B-4｜README 操作表与代码不符。** 键表引用行号写的是 `LevelRuntime.js:20`（实际 `:25`），JDG-01 被当成出处挂在表头上；
+补上 `H`（跳过教学浮层）一行；并加了一段引文说明 **←/→ 身位微调在初版没做**——它属 PLR-04（PRD `:194`，S 优先级），
+`options.unlockedNudge` 目前是空槽；`Q`/`H` 按 ledger 记账，不是既成事实。作品集验收项 DEP-04 要求 README 诚实，这条比美观重要。
+
+**UI-03｜选关页的评级徽章以前只断言了卡片数量。** 现在 `screens` case 41 → **46**：用 `SAVE.updateSave` 写一个 S 档 → `showSelect()` →
+文案含「已通关 S」且仍含另一关的「未通关」、`badge-cleared` 与 `badge-todo` 两个角色都在；再写一个 B 档重进，
+断言「已通关 B」与「已通关 S」同时成立（即徽章是**刷新**出来的，不是首次快照冻结）。收尾 `SAVE.__resetSaveState()` 免得污染后续 case。
+
+**顺手确认过、判为"不是缺陷"的两条**（写下来免得下一轮复审再报）：
+- `main.js:188` 在 `?selftest=audio` 后 `import('../tools/audioAssert.mjs')`：懒加载分块，主包 dist 1.8MB < 2MB 门槛，DEP-01 不受影响；
+- `screenshotCheck.mjs` 的 `^lv?` 正则：CR-17 已结案，它匹配的是 fixture 字符串。
+
+**没做的（本条只登记，不等于批准砍）**：游戏内**没有 HUD**。PRD `:265` UI-04（左上连击、右上三声部耐久 ×3、顶部 8% 高度带）
+与 `:223` DIS-09（连击 ≥10 判定线金色描边）都是 M 优先级，VIS-02 的「HUD 上 8%」分区因此也名存实亡——
+现状是只有暂停面和结算面显示数字。已开卡（见 TASKBOARD R13c），实现归 WORLD+leader 联合，判定点在「不得遮挡判定线」。
+
+---
+
+## CR-27 · UI-04 / DIS-09：游戏内 HUD 落地（2026-11-23，leader→WORLD，最后一个 PRD M 项）
+
+PRD `:265` UI-04「HUD：左上连击（含 ×10 金边）、右上三声部耐久 ×3（格 + 已拆解标记）、顶部 8% 高度带」，验收「HUD 不遮挡判定线与世界关键区域」；`:223` DIS-09「连击 ≥10 时判定线金色描边（纯表现，不影响判定）」；`:277` VIS-02「HUD 上 8% / 上层世界中 60% / 下层时间轴下 32%」。
+
+WORLD agent 交付（`src/game/render/HudLayer.js` NEW 282 lines，owner WORLD）：
+- `theme.js` 加 `HUD_CFG`（`goldComboMin:10`、`cellsBudget:4`、带内留白、行间距、格宽高比、字号预算）+ `hudLayout(view)` 纯函数（返回 `{band, comboBlock, combo, comboCaption, hpRows, fonts, metrics, judgeLine, clearance, blockGap, a11y}`，Node 可断言）+ `judgeLineRectOf(view)`（判定线矩形，HUD 用它自证不遮挡）。
+- `Background.js:237-256` 判定线金色描边：`Number(frame.combo) >= HUD_CFG.goldComboMin` → `lineStyle(j.lineWidth * HUD_CFG.goldStrokeScale, HUD_CFG.gold.int, alphaOf('coreEdge'))` + 辉光圈（`reduceFlash` 时整圈撤掉，border + 金边保留作为信息通道）。**纯状态驱动**，无 `performance.now`/`Date.now`/`setTimeout`/`scene.time`/`60÷bpm`（T4）。
+- `WorldLayer.js:162,249,278` 透传 `extra.combo` → `this.combo` → `background.draw` 的 `frame.combo` → `frameStats`。
+- `LevelRuntime.js:27,80-82,91,179-187,442` 加 `this.hud = new HudLayer()`，`create()` 里 `hud.init(scene, view)`，`update()` 里 `hud.sync({view, combo: ds.counts().combo, hpByTrack: ds.hpByTrack(), hpMaxByTrack: {kick: ds.hpMax('kick'), bass: ds.hpMax('bass'), synth: ds.hpMax('synth')}, disassembledTracks: ds.disassembledTracks()})`，`shutdown()` 里 `hud.shutdown()`。
+- `LevelScene.js:29` 旧 debug HUD 从 `(48, 24)` 移到 `(48, Math.round(this.scale.height * 0.08) + 8)`（HUD 带下方），不遮挡新 HUD。
+
+leader 接线 `main.js:14,261`：`import { COLORS, hudLayout } from './data/theme.js'`，`world-selftest/v1` payload 加 `payload.hud = hudLayout(view)`（Node 侧按同一套断言复核）。
+
+门禁：`screens` 56 → **73**（HUD 布局断言 17 条：1080p/720p/1440p 三视口各 5 条 + 金边状态驱动 2 条）。**变异法自证**：把 `hudLayout` 的 `band.h` 临时改成 `h * 0.1`（10% 带高），门禁立刻红在「HUD 带高 = 8%·H」上；还原后 1027/1027 绿。
+
+**PRD M 优先级需求项全部实现**：CLK/JDG/PLR/OBS/DIS/MUS/PGN/LVL/TIM/VIS/SAV/DEP/UI 六组共 50+ 条 M 项，门禁 1027/1027 全绿，verifyAll 5/5 PASS，eslint 0 error。
+
+**遗留（ledger 登记，不代改）**：PLR-04（←/→ 微调）S、MUS-06（成品 loop）S、TIM-04/DIS-10/SAV-04/UI-07 C、DEP-02/03 launch。

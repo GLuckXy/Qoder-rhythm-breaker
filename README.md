@@ -57,7 +57,7 @@ engine.loadLevel(cfg, clock) → 音序 / 静音 / 复活斜坡                 
 
 ## 操作说明
 
-按键定义在 `src/game/scenes/LevelRuntime.js:20`（`KEYMAP`，JDG-01）。
+按键定义在 `src/game/scenes/LevelRuntime.js:25`（`KEYMAP`）。
 
 | 键 | 动作 | 说明 |
 | --- | --- | --- |
@@ -68,6 +68,12 @@ engine.loadLevel(cfg, clock) → 音序 / 静音 / 复活斜坡                 
 | `Esc` | 暂停 / 恢复 | 开暂停面板，时钟只由 `clock.pause()/resume()` 决定 |
 | `R` | 重开本关 | 与首次进关走完全同一条 `start()` 路径（teardown 基线用） |
 | `Q` | 退出本关回标题 | — |
+| `H` | 跳过教学浮层 | 也可点浮层任意处；跳过与否记进存档，下次进第 1 关不再出现 |
+
+> 与 PRD `JDG-01`（:177）的一处已知差异：**`←/→` 身位微调在初版没有实现**。它属于
+> `PLR-04`（:194，优先级 S，且写明「第 1 关不使用，教学关后解锁」），存档字段
+> `options.unlockedNudge` 因此还是空位。上表里的 `Q` 与 `H` 是超出 `JDG-01` 清单的两个键，
+> 已按 `.agent/TASKBOARD.md` 的砍单/变更台账登记，不当作需求变更的既成事实。
 
 寂静段（三条声部全拆完）里按跳跃/冲刺踩的是**节拍器光点**，不产生判定事件、不进 Perfect 分母。
 

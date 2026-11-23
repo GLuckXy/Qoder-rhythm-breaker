@@ -208,4 +208,84 @@ fake-DOM 不支持的 removeAttribute、残留 60/bpm）」——也就是说它
 | K-20 | 校准小游戏要在**听不见时拒绝开局**：静音/主音量为 0 时 `sounded.add(k)` 仍记为已听，写进去的中位数是垃圾 | K-14 | ui/Calibration.js | `contract:latency` 加一条：master=0 或 mixer 静音时 `calibrationAvailability` 不可用且 `start()` 拒绝 | ready |
 | K-21 | 面板可用性是**构造时快照**（`UiLayer.js:143` 直接赋值 `calibrationAvailability(...)`），解锁/暂停状态变化后不重算 | K-14 | ui/screens/UiLayer.js | 改成 thunk，`render()`/`start()` 里现算；补一条断言：availability 变化后面板文案跟着变 | ready |
 | K-22 | judge 事件补 `beat` 字段（CR-18 要求的唯一前置）；T22 第 ④ 路和 K-19 变速栏在字段补齐前只能是 `SKIP` | CR-18 | systems/JudgeSystem.js | `node tools/playtestReport.mjs` 的 ④ 不再报「无口径」 | ready |
-| K-23 | JDG-09 写的是「8 拍跟拍取中位数」，实现丢 2 个 warmup 后取 6 个的中位数，注释把它说成 JDG-09 原文（`config.js:87`） | K-14 | ui/Calibration.js, data/config.js | 二选一：warmup 默认 0（真按 8 个取），或把这条自称改写成工程决定并走 CR 登记 | ready |
+| K-23 | JDG-09 写的是「8 拍跟拍取中位数」，实现丢 2 个 warmup 后取 6 个的中位数，门禁把它说成 JDG-09 原文 | K-14 | ui/Calibration.js, data/config.js | 二选一：warmup 默认 0，或把自称改写成工程决定并走 CR 登记 | **closed（R13）**：取后者——`contractTest.mjs:2182` 文案已改成「打 8 下（原文如此）+ 丢 2 下热身（实现补充）」；`config.js:94` 本来就这么写的。另把 JDG-09 缺失的验收断言补进门禁，见 CR-20 |
+
+## 实况状态 · R13（leader，2026-11-23）
+
+这一轮不做新功能，做**需求条目 ↔ 门禁覆盖的反查**：R12 收尾时门禁已经 5/5 全绿、公开仓冷clone 能复现，
+但「绿」只证明断言过，不证明断言覆盖了需求。逐条把 PRD 的验收列对到门禁断言上，抓到两个真窟窿：
+
+| 发现 | 性质 | 处置 |
+|---|---|---|
+| JDG-09 的验收口径（`PRD:185`「校准 0ms 与人为 +60ms 两次结果，Perfect 率差 < 3%」）在门禁里**一条断言都没有** | 需求自带的验证方法没落地 | 补 `latency ⑦`（4 条，含一条防假绿的反向断言），见 CR-20 |
+| L4 实测 `存档 NO_SAVE`（其余关都有档） | 结算写档 rides 了 500ms 节流窗，与 PRD:559「写档在结算出现时完成」冲突；任何一关「结算后 500ms 内关页」都会丢档 | 终态写入改 `throttleMs:0` + 新增 `flushOnHide()` 关页兜底，见 CR-21 |
+
+| 卡 | 任务 | 依赖 | 涉及文件 | 验收 | 状态 |
+|---|---|---|---|---|---|
+| K-24 | DEF-07：结算写档必须「在结算出现时完成」，节流只留给音量拖动 | CR-21 | src/data/save.js, src/game/scenes/LevelRuntime.js, src/main.js | `contract:save` 新增 7 条（含反向钉 applyVolumes 仍节流）+ L4/L6 浏览器复验读到档 | **leader 已修，浏览器复验进行中** |
+| K-23 | 门禁把「丢 2 下热身」自称 JDG-09 原文 | K-14 | tools/contractTest.mjs | 文案改为工程决定并登记 | closed（R13） |
+
+门禁变化：`contract` 933 → **944 断言 / 18 case / 0 skip**；`verify:all` **5/5 PASS, 0 SKIP, 0 FAIL**；
+`npx eslint` 改动文件 0 error。断言只加不减（+11 条里含 1 条变异法自测）。
+
+待办（本轮没派出去的，仍按归属排）：K-20 / K-21 / K-22(CR-18) / W-18(CR-16) /
+`screenshotCheck.mjs:632` 仍用 `^lv?`（note id 口径，独立于 CR-17）。
+
+## 实况状态 · R13b/R13c（leader，2026-11-23）
+
+R13 的反查报告（`.agent/tmp/`，agent 出的 PRD↔门禁全量对照）落地成 6 个修复 + 2 张新卡。派了两个 agent 并行，
+按 T2 严格分文件：CORE 只碰 `systems/DisassembleSystem.js`，WORLD 只碰 `render/**`+`theme.js`+`settingsScreen.js`+`Calibration.js` 消费侧，
+门禁与 `ui/screens/**`、`data/save.js` 由 leader 自己动。
+
+| 卡 | 任务 | 依赖 | 涉及文件 | 验收 | 状态 |
+|---|---|---|---|---|---|
+| K-24 | DEF-07 结算写档「在结算出现时完成」 | CR-21 | data/save.js, scenes/LevelRuntime.js, main.js | `contract:save` +7 条 + **L4/L6 浏览器复验读到档** | **closed（R13c）**：`lv4-r13b` 实况 `存档 levels={"4":{"cleared":true,"rank":"A","perfectRate":0.4699,"maxCombo":39,"miss":0,"encounterRate":0.7647}}`、重开 20 次干净、`state=RESULT`、游戏自身 console 错误 0 |
+| K-20 | 听不见时不许开始校准 | CR-23 | ui/Calibration.js | `latency` 加 `silent`（master/music 两路）+ 旧 stub 不报假话 | **closed（R13c）**，见 CR-23 |
+| K-21 | availability 不许是构造时快照 | CR-23 | ui/screens/UiLayer.js, ui/Calibration.js | 静音开面板 → 拉回音量 → `start()` 真的起播 | **closed（R13c）** |
+| B-1 | MISS 复活规则与 §7.2:342 反了（`hp=1` 赋值 + 不排除 MISS 声部） | CR-25 | systems/DisassembleSystem.js | `revive-tie` 50 → 62，含变异法自证 | **closed（R13c）**：CORE 交付 + leader 换断言 |
+| DEF-09 | SAV-01「最高评级」被差局冲掉（`deepMerge(base,{})` 是浅拷贝，best-of 比的是自己） | CR-24 | data/save.js | `save` 67 → 78 | **closed（R13c）** |
+| UI-04 / DIS-09 | **游戏内没有 HUD**：左上连击、右上三声部耐久 ×3、顶部 8% 高度带、连击 ≥10 判定线金边 | CR-26 | render/WorldLayer.js, ui/screens/*, theme.js | 实况截图能同时读到连击数与三条 hp，且判定线不被遮挡 | **ready（R13c 开卡）**，M 优先级、当前唯一没做的 PRD M 项 |
+| TIM-05 / PERF-05③ / PLR-04 | `showTimelineGuides` / `reduceFlash` / `unlockedNudge` 三个存档字段**没人消费**（写了没人读的开关就是假承诺） | CR-26 | render/Timeline.js, EffectSystem.js, settingsScreen.js | 前两个接上消费者 + 设置项；PLR-04（S）按 ledger 明示"初版未做" | **in progress（派给 WORLD）** |
+| W-18 / K-22 | 沿 R12/R13 未派 | CR-16 / CR-18 | — | — | 仍 ready |
+| ~~`screenshotCheck.mjs:632` 仍用 `^lv?`~~ | — | CR-17 | — | — | **撤销（R13c 复核）**：现在在 `:652`，位置是 `SCAN_FIXTURES_BAD` 里的 fixture 字符串，门禁自检本体不吃这个正则——CR-17 的结论成立，这条待办写错了 |
+
+门禁变化（R13b+R13c 合并）：`contract` 944 → **1000 断言 / 18 case / 0 skip**（`save` 67→78、`latency` 129→141、`screens` 41→46、`revive-tie` 50→62、`integration` 127 不变但换成行为探针）；
+`orderCheck` 17/17 PASS（L1–L6 全抵达结算）；`npx eslint src tools` **0 error 0 warning**。
+本轮两次**变异法自证**：CR-24 的浅拷贝、CR-25 的「其他」排除，都能把门禁打红再还原。
+
+## 实况状态 · R13d（leader，2026-11-23）
+
+R13c 的 HUD 卡（UI-04 / DIS-09）落地：最后一个未实现的 PRD **M** 优先级需求项完成。
+
+| 卡 | 任务 | 依赖 | 涉及文件 | 验收 | 状态 |
+|---|---|---|---|---|---|
+| UI-04 / DIS-09 | 游戏内 HUD：左上连击（≥10 金边）、右上三声部耐久 ×3、顶部 8% 高度带；判定线金色描边（combo ≥10） | CR-26 | render/HudLayer.js (NEW), render/Background.js, render/WorldLayer.js, data/theme.js, scenes/LevelRuntime.js, scenes/LevelScene.js, main.js | `contract:screens` 新增 HUD 布局断言（8%·H、不遮判定线、两块互不重叠、三声部耐久行、所有矩形在带内、金边状态驱动无时钟）+ `world-selftest/v1` payload 含 `hud` 字段 | **closed（R13d）**：WORLD agent 交付 + leader 接线 main.js + 门禁 1027/1027 |
+
+门禁变化（R13d）：`contract` 1010 → **1027 断言 / 18 case / 0 skip**（`screens` 56→73，新增 HUD 布局断言 17 条）；`verify:all` **5/5 PASS, 0 SKIP, 0 FAIL**；`npx eslint` 0 error。
+
+**PRD M 优先级需求项全部实现**：
+- CLK-01..06（双时钟）✓
+- JDG-01..08（判定）✓
+- PLR-01..03,05,06（玩家行为）✓（PLR-04 微调属 S，ledger 登记）
+- OBS-01..08（障碍）✓
+- DIS-01..10（拆解）✓（DIS-10 自由顺序属 C，ledger 登记）
+- MUS-01..05（音乐）✓（MUS-06 成品 loop 属 S，ledger 登记）
+- PGN-01,02（谱面生成）✓
+- LVL-01..04（六关）✓
+- TIM-01..03,05（时间轴）✓（TIM-04 假节拍属 C，ledger 登记）
+- VIS-01..06（视觉）✓
+- SAV-01..03（存档）✓（SAV-04 导出码属 C，ledger 登记）
+- DEP-01（vite build）✓（DEP-02 itch zip / DEP-03 发行物料 / DEP-04 README 属 launch 工作，ledger 登记）
+- UI-01..06,08,09（界面）✓（UI-07 回放属 C，ledger 登记）
+
+**未实现的 PRD 需求项（ledger 登记，不代改）**：
+- PLR-04（←/→ 微调）S 优先级
+- MUS-06（成品 loop）S 优先级
+- TIM-04（假节拍）C 优先级
+- DIS-10（自由顺序）C 优先级
+- SAV-04（导出码）C 优先级
+- DEP-02（itch zip）launch 工作
+- DEP-03（发行物料）launch 工作
+- UI-07（回放）C 优先级
+
+**初版开发完成**：所有 M 优先级需求项已实现，门禁 1027/1027 全绿，verifyAll 5/5 PASS。

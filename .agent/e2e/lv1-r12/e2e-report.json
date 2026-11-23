@@ -1,0 +1,244 @@
+{
+  "url": "http://127.0.0.1:4174/",
+  "level": 1,
+  "browser": "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+  "canvas": {
+    "w": 1256,
+    "h": 628,
+    "scenes": "0"
+  },
+  "audioContext": {
+    "state": "running",
+    "time": 1.16,
+    "builder": "AudioContext",
+    "engineKeys": "opts,ctx,mixer,metronome,voices,levelCfg,clock,schedule,clicks,cues,paused,ready,lastError,stats,_idx,_clickIdx,_cueIdx,_lastBeat,_beatClick,_volumes,_duck,_unlockBound,_gestureHandlers,master,music,sfx,duck,duckPan,voiceKits",
+    "now": 0,
+    "route": null
+  },
+  "title": {
+    "children": 1,
+    "text": "节奏拆解台 RHYTHM BREAKER · 把一首歌拆回去，再把它拼回来 已就位 6 关 · 已通关 0/6 开始 · L1 选关 设置 空格/J = 跳 · K = 冲 · R = 重开 · Esc = 暂停 · [ ] = 延迟微调（±1ms，当前值见暂停面板）"
+  },
+  "entry": {
+    "scenes": "",
+    "now": 1.46,
+    "state": null,
+    "pending": 55,
+    "tracks": 1,
+    "hp": "{\"kick\":4,\"bass\":0,\"synth\":0}"
+  },
+  "samples": [
+    {
+      "now": 6.56,
+      "perf": 9347,
+      "frames": 892,
+      "state": "DISASSEMBLED",
+      "dis": "kick",
+      "hp": "{\"kick\":0,\"bass\":0,\"synth\":0}",
+      "combo": 4,
+      "pending": 0,
+      "grades": "{\"PERFECT\":4,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5.02,
+      "dGame": 5.02,
+      "ratio": 1.001,
+      "dispatched": 4
+    },
+    {
+      "now": 11.68,
+      "perf": 14467,
+      "frames": 1784,
+      "state": "DISASSEMBLED",
+      "dis": "kick",
+      "hp": "{\"kick\":0,\"bass\":0,\"synth\":0}",
+      "combo": 4,
+      "pending": 0,
+      "grades": "{\"PERFECT\":4,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5.12,
+      "dGame": 5.12,
+      "ratio": 1,
+      "dispatched": 9
+    },
+    {
+      "now": 16.68,
+      "perf": 19469,
+      "frames": 2672,
+      "state": "DISASSEMBLED",
+      "dis": "kick",
+      "hp": "{\"kick\":0,\"bass\":0,\"synth\":0}",
+      "combo": 4,
+      "pending": 0,
+      "grades": "{\"PERFECT\":4,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5,
+      "dGame": 5,
+      "ratio": 1,
+      "dispatched": 12
+    },
+    {
+      "now": 21.83,
+      "perf": 24622,
+      "frames": 3576,
+      "state": "DISASSEMBLED",
+      "dis": "kick",
+      "hp": "{\"kick\":0,\"bass\":0,\"synth\":0}",
+      "combo": 4,
+      "pending": 0,
+      "grades": "{\"PERFECT\":4,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5.15,
+      "dGame": 5.15,
+      "ratio": 0.999,
+      "dispatched": 12
+    },
+    {
+      "now": 26.83,
+      "perf": 29622,
+      "frames": 4457,
+      "state": "DISASSEMBLED",
+      "dis": "kick",
+      "hp": "{\"kick\":0,\"bass\":0,\"synth\":0}",
+      "combo": 4,
+      "pending": 0,
+      "grades": "{\"PERFECT\":4,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5,
+      "dGame": 5,
+      "ratio": 1,
+      "dispatched": 12
+    },
+    {
+      "now": 31.99,
+      "perf": 34772,
+      "frames": 5374,
+      "state": "DISASSEMBLED",
+      "dis": "kick",
+      "hp": "{\"kick\":0,\"bass\":0,\"synth\":0}",
+      "combo": 4,
+      "pending": 0,
+      "grades": "{\"PERFECT\":4,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5.15,
+      "dGame": 5.16,
+      "ratio": 1.002,
+      "dispatched": 12
+    },
+    {
+      "now": 37.14,
+      "perf": 39919,
+      "frames": 6280,
+      "state": "DISASSEMBLED",
+      "dis": "kick",
+      "hp": "{\"kick\":0,\"bass\":0,\"synth\":0}",
+      "combo": 4,
+      "pending": 0,
+      "grades": "{\"PERFECT\":4,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5.15,
+      "dGame": 5.15,
+      "ratio": 1.001,
+      "dispatched": 12
+    },
+    {
+      "now": 42.28,
+      "perf": 45057,
+      "frames": 7200,
+      "state": "DISASSEMBLED",
+      "dis": "kick",
+      "hp": "{\"kick\":0,\"bass\":0,\"synth\":0}",
+      "combo": 4,
+      "pending": 0,
+      "grades": "{\"PERFECT\":4,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5.14,
+      "dGame": 5.14,
+      "ratio": 1,
+      "dispatched": 12
+    },
+    {
+      "now": 47.41,
+      "perf": 50195,
+      "frames": 8111,
+      "state": "DISASSEMBLED",
+      "dis": "kick",
+      "hp": "{\"kick\":0,\"bass\":0,\"synth\":0}",
+      "combo": 4,
+      "pending": 0,
+      "grades": "{\"PERFECT\":4,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5.14,
+      "dGame": 5.13,
+      "ratio": 0.998,
+      "dispatched": 12
+    },
+    {
+      "now": 52.55,
+      "perf": 55327,
+      "frames": 9015,
+      "state": "DISASSEMBLED",
+      "dis": "kick",
+      "hp": "{\"kick\":0,\"bass\":0,\"synth\":0}",
+      "combo": 4,
+      "pending": 0,
+      "grades": "{\"PERFECT\":4,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5.13,
+      "dGame": 5.14,
+      "ratio": 1.002,
+      "dispatched": 12
+    },
+    {
+      "now": 57.56,
+      "perf": 60347,
+      "frames": 9913,
+      "state": "DISASSEMBLED",
+      "dis": "kick",
+      "hp": "{\"kick\":0,\"bass\":0,\"synth\":0}",
+      "combo": 4,
+      "pending": 0,
+      "grades": "{\"PERFECT\":4,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5.02,
+      "dGame": 5.01,
+      "ratio": 0.998,
+      "dispatched": 12
+    }
+  ],
+  "autoplayer": {
+    "fires": 0,
+    "stale": 0,
+    "byGrade": {
+      "PERFECT": 4,
+      "GOOD": 0,
+      "MISS": 0
+    },
+    "queueShape": null,
+    "judgmentFields": "grade,obstacleId,track,type,isCore,actionMatch,deltaMs,rule,trigger,key,penalizes,atSec",
+    "noteCount": 4,
+    "targets": 12,
+    "frames": 12203
+  },
+  "final": {
+    "state": "RESULT",
+    "stats": "{\"state\":\"RESULT\",\"total\":55,\"coreTotal\":16,\"baseTotal\":55,\"baseCoreTotal\":16,\"revivedIssued\":0,\"perfect\":4,\"corePerfect\":4,\"good\":0,\"miss\":0,\"dotMiss\":8,\"combo\":0,\"maxCombo\":4,\"perfectRate\":0.07272727272727272,\"coreHitRate\":0.25,\"encounterObstacles\":4,\"encounterDots\":8,\"encounterTotal\":12,\"encounterPerfect\":4,\"encounterRate\":0.3333333333333333,\"dotsStomped\":0,\"dotsLive\":8,\"rank\":\"C\",\"hp\":{\"kick\":0,\"bass\":0,\"synth\":0},\"disassembled\":true,\"disassembledTracks\":[\"kick\"],\"disassembleBeat\":{\"kick\":9.370777777777779,\"bass\":null,\"synth\":null},\"freeOrder\":false,\"dots\":[{\"beat\":120,\"state\":\"expired\"},{\"beat\":121,\"state\":\"expired\"},{\"beat\":122,\"state\":\"expired\"},{\"beat\":123,\"state\":\"expired\"},{\"beat\":124,\"state\":\"expired\"},{\"beat\":125,\"state\":\"expired\"},{\"beat\":126,\"state\":\"expired\"},{\"beat\":127,\"state\":\"expired\"}]}",
+    "ui": "C L1 启动 再来一遍 · 全声部已拆解 → 寂静段走完 评级 Perfect 率 33.3% 谱面 Perfect 率 7.3% 核心命中率 25% 最高连击 4 MISS 0 光点 MISS 8 分母 = 本关可判定障碍 55（固定分母，与复活/重开无关） · PERFECT 4 · 核心 16 · 背景层不计入 评级口径 = （PERFECT 4 + 踩灭光点 0）/（实际遭遇障碍 4 + 进场光点 8）= 4/12 · 退役未",
+    "uiChildren": 1,
+    "canvas": 1
+  },
+  "teardown": {
+    "before": {
+      "pending": 0,
+      "ignored": 0,
+      "listeners": 0
+    },
+    "after": {
+      "pending": 55,
+      "ignored": 39,
+      "canvas": 1,
+      "running": true,
+      "now": 75.87
+    }
+  },
+  "consoleErrorCount": 0,
+  "gameErrors": [],
+  "harnessErrors": [],
+  "networkFailures": [],
+  "consoleSample": [
+    "log: %c %c %c %c %c Phaser v3.90.0 (WebGL | Web Audio) %c https://phaser.io/v390 background: #ff0000 background: #ffff00 background: #00ff00 background: #00ffff color: #ffffff; background: #000000 background: transparent",
+    "warning: [save] localStorage 不可用（隐私模式或 iframe 分区） → 本次会话使用内存档，不阻断游戏（SAV-03）",
+    "log: %c %c %c %c %c Phaser v3.90.0 (WebGL | Web Audio) %c https://phaser.io/v390 background: #ff0000 background: #ffff00 background: #00ff00 background: #00ffff color: #ffffff; background: #000000 background: transparent",
+    "warning: [save] localStorage 不可用（隐私模式或 iframe 分区） → 本次会话使用内存档，不阻断游戏（SAV-03）",
+    "log: %c %c %c %c %c Phaser v3.90.0 (WebGL | Web Audio) %c https://phaser.io/v390 background: #ff0000 background: #ffff00 background: #00ff00 background: #00ffff color: #ffffff; background: #000000 background: transparent",
+    "warning: [save] localStorage 不可用（隐私模式或 iframe 分区） → 本次会话使用内存档，不阻断游戏（SAV-03）"
+  ]
+}

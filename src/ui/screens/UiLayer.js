@@ -10,7 +10,7 @@
 // `engine.playSfx('ui')`（C6 冻结方法），五个界面的每一颗按钮都调它。**这里不 new AudioContext、
 // 不挂解锁监听**（CR-11：解锁只在 main.js 一处），引擎没接上时静默跳过。
 
-import { mountRoot, detach, binder } from './dom.js';
+import { mountRoot, detach, binder, setFlashReduced } from './dom.js';
 import { buildTitle } from './titleScreen.js';
 import { buildSelect } from './levelSelect.js';
 import { buildPause } from './pauseScreen.js';
@@ -28,6 +28,9 @@ const NAMES = ['title', 'select', 'pause', 'settings', 'result', 'calibration'];
  */
 export function createUiLayer(deps = {}) {
   const root = mountRoot(deps);
+  // PERF-05③（光敏安全）：勾过「降低闪烁」的玩家重开页面，第一帧就得拿到 data-rb-flash，
+  // 不能等第一次进设置页才补——「先闪一下再说」在这种开关上不成立。
+  setFlashReduced(!!getSave().options.reduceFlash);
   const bag = binder();
   let currentEl = null;
   let currentName = null;
@@ -52,6 +55,20 @@ export function createUiLayer(deps = {}) {
       s.options.strictWindow = !!on;
       return s;
     });
+  }
+
+  /**
+   * TIM-05 / PERF-05③：两个辅助线/闪烁开关的唯一写口（写档仍走 updateSave 这一条路，SAV-02）。
+   * 消费侧不需要这里通知：`LevelRuntime._syncA11y()` 每帧从 `getSave()` 现算 `view.a11y`，
+   * canvas 侧同帧跟上；CSS 侧由 settingsScreen 自己调 `setFlashReduced`。
+   */
+  function applyOption(key, on) {
+    if (key !== 'showTimelineGuides' && key !== 'reduceFlash') return false;
+    updateSave((s) => {
+      s.options[key] = !!on;
+      return s;
+    });
+    return true;
   }
 
   function applyLatency(ms) {
@@ -133,14 +150,18 @@ export function createUiLayer(deps = {}) {
    *   沿用 showSettings 的老坑规避：mount()→close() 会复位 settingsReturn，回跳目标必须提前抓住）
    */
   function showCalibration(opt = {}) {
-    const rt = runtime();
     const backTo = typeof opt.back === 'function' ? opt.back : () => showTitle();
     closeCalibration();
     const panel = createCalibrationPanel({
       engine: deps.engine,
       cal: deps.cal, // 测试注入口（contractTest latency case 用 MockClock 驱动会话）；生产缺省 = 独立 BeatClock + engine.ctx.currentTime
       host: typeof window !== 'undefined' ? window : null,
-      availability: calibrationAvailability(deps.engine, rt ? { paused: !!rt.paused } : null),
+      availability: () => {
+        // K-21：这里给的是**函数**而不是建面板时的那一份快照——面板每次 render/start 前重读，
+        // 于是「面板开着时把主音量拉到 0」（K-20）或「中途被暂停」都能立刻改成只微调。
+        const r = runtime();
+        return calibrationAvailability(deps.engine, r ? { paused: !!r.paused } : null);
+      },
       apply: applyLatency, // ★ 唯一写入通路：judge.setLatency + updateSave({audio:{latencyOffset}})
       getLatency: readLatency,
       windows: () => (deps.judge && typeof deps.judge.windows === 'function' ? deps.judge.windows() : null),
@@ -256,7 +277,11 @@ export function createUiLayer(deps = {}) {
       volumes: vol,
       strictWindow: !!save.options.strictWindow,
       latencyMs: deps.judge && typeof deps.judge.getLatency === 'function' ? deps.judge.getLatency() : Number(save.audio.latencyOffset) || 0,
-      windows: deps.judge && typeof deps.judge.windows === 'function' ? deps.judge.windows() : null
+      windows: deps.judge && typeof deps.judge.windows === 'function' ? deps.judge.windows() : null,
+      // TIM-05 / PERF-05③：这两个字段以前只是写进档里没人读（假开关）。
+      // showTimelineGuides 的「未设置」按开处理（老档没这个键时保持出厂表现）。
+      showTimelineGuides: save.options.showTimelineGuides !== false,
+      reduceFlash: !!save.options.reduceFlash
     };
   }
 
@@ -271,6 +296,7 @@ export function createUiLayer(deps = {}) {
         uiSound: playUiSound,
         onVolumes: applyVolumes,
         onStrict: applyStrict,
+        onOption: applyOption,
         onLatency: applyLatency,
         onCalibrate: () => showCalibration({ from: 'settings', back: () => showSettings(origin) }),
         onBack: () => {

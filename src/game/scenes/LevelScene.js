@@ -26,7 +26,7 @@ export class LevelScene extends Phaser.Scene {
       return;
     }
     this.cfg = cfg;
-    this.hud = this.add.text(48, 24, '', { fontFamily: 'monospace', fontSize: '20px', color: COLORS.system.hex });
+    this.hud = this.add.text(48, Math.round(this.scale.height * 0.08) + 8, '', { fontFamily: 'monospace', fontSize: '20px', color: COLORS.system.hex });
     this.logLine = this.add.text(48, this.scale.height - 44, '', { fontFamily: 'monospace', fontSize: '20px', color: INK_HEX });
     this.result = this.add.text(this.scale.width * 0.5 - 180, this.scale.height * 0.32, '', {
       fontFamily: 'monospace',

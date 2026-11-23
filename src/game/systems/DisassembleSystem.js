@@ -292,12 +292,29 @@ export class DisassembleSystemCore {
   }
 
   /**
-   * DIS-03 复活选择（C3 签名 `onMiss()`，可选参数仅为归因，不影响口径）：
+   * DIS-02/03/05 复活选择（C3 签名 `onMiss()`，`opt.track` = 刚刚 MISS 的声部，仅供选靶归因）：
    *   · 清连击 + 起无敌帧（§7.2）
    *   · SILENCE 段内 → **不复活任何声部**（DIS-07），返回 null
    *   · 全部在场声部都在满 hp → 不改音频、不复活（DIS-03 第三条「全 hp=4」口径），返回 null
-   *   · 否则取 hp 最小者（PRD 原文「损失点数最多」＝hp 最小且 ≥0）；并列按 kick > bass > synth；hp → REVIVE_HP(=1)
+   *   · 否则取「其他损失点数最多的声部」+1（≤hpMax）；并列按 kick > bass > synth
    * @returns {string|null} 受影响 track
+   *
+   * ★★ 规则出处（改动前请读，别再把它「恢复」成 `hp = REVIVE_HP(=1)`）★★
+   *   PRD §7.2 状态矩阵 :342 「MISS（声部未全满）」行写的正是
+   *     `hp = **其他**损失最大声部 +1（≤4）`
+   *   —— 两件事被这一格同时钉死：
+   *     ① 增量是 **+1 并夹到 hpMax**，不是「置为 1」。DIS-02:216 只说「MISS → 复活 1 点」，
+   *        DIS-05:219 的「hp 回到 1（不是 4）」是 **hp=0 那条声部** 的 0→1 实例，
+   *        它本身就是 `min(hpMax, 0+1)`；把「回到 1」当成通用赋值，等于让一次 MISS
+   *        把 hp=2 的声部**降到** 1 —— 惩罚反而送玩家一格拆解进度，与 DIS-02「PERFECT → hp−1」
+   *        的单向单调性直接矛盾（DEF-05 的遭遇口径、§7.3 的核心命中率都会因此虚高）。
+   *     ② 「其他」＝ 刚刚 MISS 的那条声部要**排除**在候选之外（DIS-03:217 的「损失点数最多的声部」
+   *        在 §7.2 被限定为「其他」）。不排的话，打得越烂的声部越被优先补，MISS 自己补自己。
+   *   回落口径（唯一受损声部就是 MISS 那条时）：「其他」集合为空，此时按 DIS-02 的字面
+   *   「MISS → 复活 1 点」只能给它自己 +1；否则 L1 这类**只配一个声部**的关卡（level1.json
+   *   bass/synth hp=0 且不参与）永远无法把 kick 补回满血，MISS 变成纯清连击。
+   *   候选域还顺手收窄到「在场且受损（hp<hpMax）」：未配置声部 hp 恒 0，旧写法用
+   *   `REVIVE_PRIORITY.find((t) => this._hp[t] === minHp)` 有把它选中的可能。
    */
   onMiss(opt = {}) {
     if (opt.source !== 'silenceDot') this._n.miss += 1; // §7.3 的 MISS 数只统计谱面障碍；光点另计 _n.dotMiss
@@ -309,22 +326,32 @@ export class DisassembleSystemCore {
     const live = DIS_TRACKS.filter((t) => this._activeTrack[t]);
     if (!live.length) return null;
     if (live.every((t) => this._hp[t] === this._hpMax[t])) return null; // 全满 → 仅清连击，不改音频
-    const minHp = Math.min(...live.map((t) => this._hp[t]));
-    const pick = REVIVE_PRIORITY.find((t) => this._hp[t] === minHp);
+    // §7.2:342 的「其他」：把 MISS 的声部踢出候选（踢不动=它就是唯一受损者时回落回它自己，见上面注释）
+    const missed = DIS_TRACKS.includes(opt.track) && this._activeTrack[opt.track] === true ? opt.track : null;
+    const damaged = live.filter((t) => this._hp[t] < this._hpMax[t]);
+    const others = damaged.filter((t) => t !== missed);
+    const cand = others.length ? others : damaged;
+    const minHp = Math.min(...cand.map((t) => this._hp[t]));
+    const pick = REVIVE_PRIORITY.find((t) => cand.includes(t) && this._hp[t] === minHp);
     if (!pick) return null;
     // DIS-03/05 的收口：一次 MISS 只有在**真的改变了什么**（hp 被抬起、或确有被拆解摘掉的未来事件要补发）
     // 时才发 hp-change / revive 事件。否则它只清连击+起无敌帧——与上面「全 hp=4 不改音频」同一条口径。
     // 不这样收口时，每次 MISS 都发一次 ids:[] 的 revive，LevelRuntime 会因此重跑队列登记，
     // 已被 registerObstacles 拉回 pending 的旧障碍再次超时 MISS，形成 MISS 指数放大（R5 浏览器实测）。
-    const hpChanged = this._hp[pick] !== REVIVE_HP;
+    // ★ 收口本身不改：候选域收窄到「受损」后 hpChanged 恒为 true（before<hpMax ⇒ before+1≤hpMax），
+    //   于是「无事发生就一个事件都不发」这条 R5 保险继续守着 ids 那一侧。留着的另一重价值：
+    //   将来若有人把 +1 改成别的增量、被 hpMax 夹住，这里仍然不会发出空事件。
+    const before = this._hp[pick];
+    const after = Math.min(this._hpMax[pick], before + 1); // §7.2:342 的 +1（≤4）；DIS-05 的 0→1 是 before=0 的实例
+    const hpChanged = after !== before;
     if (hpChanged) {
-      this._hp[pick] = REVIVE_HP;
+      this._hp[pick] = after;
       this._hpWrittenBy = 'onMiss';
-      this._emit('hp-change', { track: pick, hp: REVIVE_HP, reason: 'revive' }, atSec);
+      this._emit('hp-change', { track: pick, hp: after, reason: 'revive' }, atSec);
     }
     const ids = this._regenerate(pick, atSec);
     if (!hpChanged && !ids.length) return pick; // 无事发生：不发 revive、不迁移状态（WORLD/SOUND/判定队列都不动）
-    this._emit('revive', { track: pick, hp: REVIVE_HP, ids, from: 'revive' }, atSec);
+    this._emit('revive', { track: pick, hp: after, ids, from: 'revive' }, atSec);
     if (this._state === 'DISASSEMBLED') {
       // DIS-08 的回退边：这就是「世界重建」事件（WORLD 收到 state-change reason:'revive' + revive ids）
       this.transition('PEAK', { reason: 'revive', atSec });

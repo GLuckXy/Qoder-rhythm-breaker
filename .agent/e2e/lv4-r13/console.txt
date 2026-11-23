@@ -1,0 +1,6 @@
+log: %c %c %c %c %c Phaser v3.90.0 (WebGL | Web Audio) %c https://phaser.io/v390 background: #ff0000 background: #ffff00 background: #00ff00 background: #00ffff color: #ffffff; background: #000000 background: transparent
+warning: [save] localStorage 不可用（隐私模式或 iframe 分区） → 本次会话使用内存档，不阻断游戏（SAV-03）
+log: %c %c %c %c %c Phaser v3.90.0 (WebGL | Web Audio) %c https://phaser.io/v390 background: #ff0000 background: #ffff00 background: #00ff00 background: #00ffff color: #ffffff; background: #000000 background: transparent
+warning: [save] localStorage 不可用（隐私模式或 iframe 分区） → 本次会话使用内存档，不阻断游戏（SAV-03）
+log: %c %c %c %c %c Phaser v3.90.0 (WebGL | Web Audio) %c https://phaser.io/v390 background: #ff0000 background: #ffff00 background: #00ff00 background: #00ffff color: #ffffff; background: #000000 background: transparent
+warning: [save] localStorage 不可用（隐私模式或 iframe 分区） → 本次会话使用内存档，不阻断游戏（SAV-03）

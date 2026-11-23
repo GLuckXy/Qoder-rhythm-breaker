@@ -11,13 +11,14 @@
 // 帧计数只用「第几帧」这个整数（Phaser 的 POST_UPDATE 信号），要「何时」一律 clock.now()。
 
 import Phaser from 'phaser';
-import { COLORS } from './data/theme.js'; // CR-13：底色走 C8 色板，不写字面量
+import { COLORS, hudLayout } from './data/theme.js'; // CR-13：底色走 C8 色板，不写字面量
 import { mountDebugPanel } from './ui/DebugPanel.js';
 import { BeatClock, JudgeSystem, DisassembleSystem, soundEngine } from './game/scenes/appDeps.js';
 import BootScene, { loadLevel, availableLevelIds, levelCatalog } from './game/scenes/BootScene.js';
 import TitleScene from './game/scenes/TitleScene.js';
 import LevelScene from './game/scenes/LevelScene.js';
 import { createUiLayer } from './ui/screens/UiLayer.js';
+import { flushOnHide } from './data/save.js'; // DEF-07：节流中的写入要在关页前落盘
 import { uiRef } from './game/scenes/appDeps.js';
 
 /* ------------------------------------------------------------------ */
@@ -258,6 +259,8 @@ export async function runWorldSelftest(opt = {}) {
   // W-13 教学浮层：把「第几拍、第几步、框在哪」原样交出去，Node 侧按同一套断言复核（未知键 = 旧负载照常通过）。
   if (rt.overlay && typeof rt.overlay.snapshot === 'function') payload.overlay = rt.overlay.snapshot();
   else errors.push('rt.overlay 缺失：LevelRuntime 的教学接线断了（W-13）');
+  // R13c HUD（UI-04 / DIS-09）：把布局矩形原样交出去，Node 侧按同一套断言复核（band=8%·H、不遮挡判定线、两块互不重叠）。
+  payload.hud = hudLayout(view);
   if (opt.timeline !== false) {
     try {
       // 动态 import：Timeline 归 WORLD，只在这条路由需要，装不进也只降级掉 timeline 一项。
@@ -355,6 +358,7 @@ export const api = {
 if (typeof window !== 'undefined') {
   window.__CORE__ = api;
   window.__CONSOLE_ERRORS__ = console_;
+  flushOnHide(); // DEF-07：pagehide/visibilitychange 兜底，节流窗口内的写入不随关页丢失
 }
 
 game.events.once('destroy', () => {

@@ -12,14 +12,19 @@
 // W-13 教学浮层的最小接线（leader 授权，只做四件事，全部走已有通道）：
 //   装载时 overlay.init(scene, view) → 每帧 overlay.sync({clock, beat}) → H/点击 → skipTutorial() 落存档
 //   → shutdown() 里释放。浮层的显隐与换步**只由拍决定**（拍来自 BeatClock），本文件不替它记任何秒表。
+//
+// TIM-05 / PERF-05③ 的两个存档开关（本轮接上，此前是零消费者的死字段）：
+//   create() 建 view 时带上 save.options → update() 里 _syncA11y() 每帧比一次布尔保持新鲜
+//   → WorldLayer / Background 从 view.a11y 读。写档仍然只有设置面板那一条 updateSave 通路。
 
-import { buildView } from '../../data/theme.js';
+import { a11yOf, buildView } from '../../data/theme.js';
 import { nudgeLatency } from '../../data/config.js';
 import { getSave, updateSave } from '../../data/save.js';
 import * as PG from '../systems/PatternGenerator.js';
 import { expectedAction } from '../systems/JudgeSystem.js';
 import { GAME_STATES } from '../systems/DisassembleSystem.js';
 import OverlayLayer from '../render/OverlayLayer.js';
+import HudLayer from '../render/HudLayer.js';
 
 /** 键位（JDG-01）。左右微调属 WORLD 的角色，这里只登记不实现。 */
 export const KEYMAP = Object.freeze({
@@ -72,15 +77,21 @@ export class LevelRuntime {
      * 浮层自己不复述任何一张表，所以改键 / 改判定动作都不会让教学文案变成假话。
      */
     this.overlay = deps.overlay || new OverlayLayer({ expectedAction: (type) => this.expectedActionFor(type), keymap: KEYMAP });
+    /** UI-04 / DIS-09：游戏内 HUD（左上连击 + 右上三声部耐久 ×3 + 顶部 8% 带）。
+     *  与 world/overlay 同一个 host、同一个 view；数据源 = ds.counts() + ds.hpByTrack()，不另持真相。 */
+    this.hud = deps.hud || new HudLayer();
   }
 
   /* ---------------- ① 装载 ---------------- */
 
   /** scene.create() 调一次：建世界层 + 订阅表 + 键位，然后 start()。 */
   create() {
-    this.view = buildView(this.scene.scale.width || 1280, this.scene.scale.height || 720, {});
+    // TIM-05 / PERF-05③：存档里的两个开关从「建 view」这一刻就带着（view 是渲染层唯一读侧）。
+    // 开关在设置里被改动时不必重开关卡 —— update() 每帧复核一次，见 _syncA11y()。
+    this.view = buildView(this.scene.scale.width || 1280, this.scene.scale.height || 720, a11yOf(getSave().options));
     this.world.init(this.scene, this.view);
     this.overlay.init(this.scene, this.view); // W-13：与 world 同一个 host、同一个 view
+    this.hud.init(this.scene, this.view);     // UI-04：与 world/overlay 同一个 host、同一个 view
 
     const save = getSave();
     this.judge.setStrictWindow(!!save.options.strictWindow);
@@ -160,17 +171,44 @@ export class LevelRuntime {
     if (this.engine && typeof this.engine.pump === 'function') this.engine.pump(nowSec); // ③ 滚动预调度
     const extra = this._extra;
     this._extra = {};
+    this._syncA11y(); // 设置里刚翻的开关必须在 world.sync 之前落到 view 上（同帧生效，不用重开）
     extra.judgment = this._judgment;
     extra.hpByTrack = this.ds.hpByTrack();
     extra.disassembledTracks = this.ds.disassembledTracks();
     this.world.sync({ clock: this.clock, instances: this.ds.activeInstances(), view: this.view }, extra);
     // W-13：浮层吃**同一帧的同一个取样点**（beat = clock.beatAt(nowSec)），不另开第二个时间源。
     this.overlay.sync({ clock: this.clock, beat: this.clock.beatAt(nowSec), view: this.view });
+    // UI-04：HUD 读同一帧的 combo / hp / 已拆解集合（数据源 = ds，本层不另持真相）。
+    // 不传 a11y：HUD 从 view.a11y 读（_syncA11y 每帧已刷），避免多一次 getSave()。
+    if (this.hud) {
+      this.hud.sync({
+        view: this.view,
+        combo: this.ds.counts().combo,
+        hpByTrack: extra.hpByTrack,
+        hpMaxByTrack: { kick: this.ds.hpMax('kick'), bass: this.ds.hpMax('bass'), synth: this.ds.hpMax('synth') },
+        disassembledTracks: extra.disassembledTracks
+      });
+    }
     if (this._judgmentAt && nowSec - this._judgmentAt > 0.25) this._judgment = null;
   }
 
-  /* ---------------- ③ 事件接线 ---------------- */
+  /**
+   * TIM-05 / PERF-05③：把 `save.options` 的两个开关保持到 `view.a11y` 上（渲染层每帧读 view）。
+   * `getSave()` 返回的是 save.js 的内存单例（不在帧里读 localStorage），加上这里只比两个布尔，
+   * 代价低于本帧已有的任何一次 Math.hypot ⇒ 所以用「每帧复核」换掉「订阅/事件通道」这套接线：
+   * 设置面板翻完开关，下一帧世界就变，不必重开本关，也不新增任何跨模块耦合（T5 只是追加字段）。
+   * 只做布尔相等比较 ⇒ 无抖动写入；几何、分区、pxPerBeat 一律不动（T5 不许重定义既有字段）。
+   * @returns {boolean} 本帧是否发生了切换
+   */
+  _syncA11y() {
+    const next = a11yOf(getSave().options);
+    const cur = this.view.a11y;
+    if (cur && cur.showTimelineGuides === next.showTimelineGuides && cur.reduceFlash === next.reduceFlash) return false;
+    this.view.a11y = next;
+    return true;
+  }
 
+  /* ---------------- ③ 事件接线 ---------------- */
   _onJudgment(j) {
     this._judgment = j;
     this._judgmentAt = this.clock.now();
@@ -233,18 +271,23 @@ export class LevelRuntime {
 
   _writeSave(stats) {
     const key = String(this.cfg.id ?? 0);
-    updateSave((save) => {
-      save.levels[key] = {
-        cleared: stats.disassembled,
-        rank: stats.rank,
-        perfectRate: Number(stats.perfectRate.toFixed(4)),
-        encounterRate: Number(stats.encounterRate.toFixed(4)),
-        maxCombo: stats.maxCombo,
-        miss: stats.miss
-      };
-      save.meta.totalRuns = (Number(save.meta.totalRuns) || 0) + 1;
-      return save;
-    });
+    // PRD:559「写档在结算出现时完成」：结算是一次性的终态写入，不 rides SAV-02 的 500ms 节流
+    //（节流是给音量拖动用的）。异步 = 玩家在结算后立刻关页就会丢成绩。
+    updateSave(
+      (save) => {
+        save.levels[key] = {
+          cleared: stats.disassembled,
+          rank: stats.rank,
+          perfectRate: Number(stats.perfectRate.toFixed(4)),
+          encounterRate: Number(stats.encounterRate.toFixed(4)),
+          maxCombo: stats.maxCombo,
+          miss: stats.miss
+        };
+        save.meta.totalRuns = (Number(save.meta.totalRuns) || 0) + 1;
+        return save;
+      },
+      { throttleMs: 0 }
+    );
   }
 
   /* ---------------- 输入 ---------------- */
@@ -395,6 +438,7 @@ export class LevelRuntime {
     this.clock.stop();
     this.world.shutdown();
     this.overlay.shutdown(); // W-13：graphics/text 容器与 world 一起释放（监听已在 _offs 里逐条摘掉）
+    this.hud.shutdown();     // UI-04：HUD 的 graphics/text 容器与 world/overlay 一起释放
     if (this.engine) {
       this.engine.beatClick(false);
       if (opt.disposeAudio) this.engine.dispose();

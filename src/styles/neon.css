@@ -302,3 +302,17 @@ canvas {
     transition: none !important;
   }
 }
+
+/*
+ * PERF-05③ 的 **DOM 侧**开关（PRD:311「频闪可关」要的是一颗玩家按得到的开关，
+ * 而不是只蹭 OS 偏好 —— 光敏玩家未必知道系统里那个设置在哪）。
+ * 写属性的人 = ui/screens/dom.js 的 setFlashReduced(on)；画布那半边（碎裂 / vignette /
+ * 震屏 / 边缘脉冲）由 view.a11y 在 WorldLayer·Background 里削减，两条路互不依赖。
+ * 这里只许动 animation/transition（不新增颜色，CR-13）；分区几何与文字尺寸一律不碰。
+ */
+:root[data-rb-flash='reduce'] .rb-anim,
+:root[data-rb-flash='reduce'] .rb-btn,
+:root[data-rb-flash='reduce'] .rb-panel {
+  animation: none !important;
+  transition: none !important;
+}

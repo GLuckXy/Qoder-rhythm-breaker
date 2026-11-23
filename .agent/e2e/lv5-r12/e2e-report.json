@@ -1,0 +1,244 @@
+{
+  "url": "http://127.0.0.1:4174/",
+  "level": 5,
+  "browser": "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+  "canvas": {
+    "w": 1256,
+    "h": 628,
+    "scenes": "0"
+  },
+  "audioContext": {
+    "state": "running",
+    "time": 1.171,
+    "builder": "AudioContext",
+    "engineKeys": "opts,ctx,mixer,metronome,voices,levelCfg,clock,schedule,clicks,cues,paused,ready,lastError,stats,_idx,_clickIdx,_cueIdx,_lastBeat,_beatClick,_volumes,_duck,_unlockBound,_gestureHandlers,master,music,sfx,duck,duckPan,voiceKits",
+    "now": 0,
+    "route": null
+  },
+  "title": {
+    "children": 1,
+    "text": "节奏拆解台 RHYTHM BREAKER · 把一首歌拆回去，再把它拼回来 已就位 6 关 · 已通关 0/6 开始 · L1 选关 设置 空格/J = 跳 · K = 冲 · R = 重开 · Esc = 暂停 · [ ] = 延迟微调（±1ms，当前值见暂停面板）"
+  },
+  "entry": {
+    "scenes": "",
+    "now": 1.43,
+    "state": null,
+    "pending": 64,
+    "tracks": 3,
+    "hp": "{\"kick\":4,\"bass\":4,\"synth\":4}"
+  },
+  "samples": [
+    {
+      "now": 6.51,
+      "perf": 9366,
+      "frames": 777,
+      "state": "BUILD",
+      "dis": "",
+      "hp": "{\"kick\":3,\"bass\":3,\"synth\":3}",
+      "combo": 5,
+      "pending": 59,
+      "grades": "{\"PERFECT\":5,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5,
+      "dGame": 5,
+      "ratio": 1,
+      "dispatched": 5
+    },
+    {
+      "now": 11.52,
+      "perf": 14373,
+      "frames": 1537,
+      "state": "PEAK",
+      "dis": "",
+      "hp": "{\"kick\":2,\"bass\":3,\"synth\":3}",
+      "combo": 11,
+      "pending": 53,
+      "grades": "{\"PERFECT\":11,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5.01,
+      "dGame": 5.01,
+      "ratio": 1.001,
+      "dispatched": 11
+    },
+    {
+      "now": 16.57,
+      "perf": 19425,
+      "frames": 2325,
+      "state": "PEAK",
+      "dis": "",
+      "hp": "{\"kick\":2,\"bass\":2,\"synth\":2}",
+      "combo": 16,
+      "pending": 48,
+      "grades": "{\"PERFECT\":16,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5.05,
+      "dGame": 5.05,
+      "ratio": 1,
+      "dispatched": 16
+    },
+    {
+      "now": 21.7,
+      "perf": 24560,
+      "frames": 3232,
+      "state": "PEAK",
+      "dis": "",
+      "hp": "{\"kick\":1,\"bass\":2,\"synth\":2}",
+      "combo": 22,
+      "pending": 42,
+      "grades": "{\"PERFECT\":22,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5.13,
+      "dGame": 5.13,
+      "ratio": 0.999,
+      "dispatched": 22
+    },
+    {
+      "now": 26.78,
+      "perf": 29639,
+      "frames": 4146,
+      "state": "PEAK",
+      "dis": "kick",
+      "hp": "{\"kick\":0,\"bass\":1,\"synth\":1}",
+      "combo": 27,
+      "pending": 18,
+      "grades": "{\"PERFECT\":27,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5.08,
+      "dGame": 5.08,
+      "ratio": 1,
+      "dispatched": 27
+    },
+    {
+      "now": 31.87,
+      "perf": 34722,
+      "frames": 5058,
+      "state": "PEAK",
+      "dis": "kick",
+      "hp": "{\"kick\":0,\"bass\":1,\"synth\":1}",
+      "combo": 29,
+      "pending": 16,
+      "grades": "{\"PERFECT\":29,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5.08,
+      "dGame": 5.09,
+      "ratio": 1.001,
+      "dispatched": 32
+    },
+    {
+      "now": 36.94,
+      "perf": 39787,
+      "frames": 5968,
+      "state": "PEAK",
+      "dis": "kick|bass",
+      "hp": "{\"kick\":0,\"bass\":0,\"synth\":1}",
+      "combo": 32,
+      "pending": 7,
+      "grades": "{\"PERFECT\":32,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5.07,
+      "dGame": 5.07,
+      "ratio": 1.001,
+      "dispatched": 37
+    },
+    {
+      "now": 42.02,
+      "perf": 44867,
+      "frames": 6871,
+      "state": "DISASSEMBLED",
+      "dis": "kick|bass|synth",
+      "hp": "{\"kick\":0,\"bass\":0,\"synth\":0}",
+      "combo": 33,
+      "pending": 0,
+      "grades": "{\"PERFECT\":33,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5.08,
+      "dGame": 5.08,
+      "ratio": 1,
+      "dispatched": 40
+    },
+    {
+      "now": 47.14,
+      "perf": 49984,
+      "frames": 7773,
+      "state": "DISASSEMBLED",
+      "dis": "kick|bass|synth",
+      "hp": "{\"kick\":0,\"bass\":0,\"synth\":0}",
+      "combo": 33,
+      "pending": 0,
+      "grades": "{\"PERFECT\":33,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5.12,
+      "dGame": 5.12,
+      "ratio": 1.001,
+      "dispatched": 42
+    },
+    {
+      "now": 52.19,
+      "perf": 55039,
+      "frames": 8574,
+      "state": "DISASSEMBLED",
+      "dis": "kick|bass|synth",
+      "hp": "{\"kick\":0,\"bass\":0,\"synth\":0}",
+      "combo": 33,
+      "pending": 0,
+      "grades": "{\"PERFECT\":33,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5.05,
+      "dGame": 5.05,
+      "ratio": 0.999,
+      "dispatched": 45
+    },
+    {
+      "now": 57.26,
+      "perf": 60114,
+      "frames": 9380,
+      "state": "DISASSEMBLED",
+      "dis": "kick|bass|synth",
+      "hp": "{\"kick\":0,\"bass\":0,\"synth\":0}",
+      "combo": 33,
+      "pending": 0,
+      "grades": "{\"PERFECT\":33,\"GOOD\":0,\"MISS\":0}",
+      "dWall": 5.08,
+      "dGame": 5.07,
+      "ratio": 0.999,
+      "dispatched": 48
+    }
+  ],
+  "autoplayer": {
+    "fires": 0,
+    "stale": 0,
+    "byGrade": {
+      "PERFECT": 33,
+      "GOOD": 0,
+      "MISS": 0
+    },
+    "queueShape": null,
+    "judgmentFields": "grade,obstacleId,track,type,isCore,actionMatch,deltaMs,rule,trigger,key,penalizes,atSec",
+    "noteCount": 33,
+    "targets": 48,
+    "frames": 11499
+  },
+  "final": {
+    "state": "RESULT",
+    "stats": "{\"state\":\"RESULT\",\"total\":64,\"coreTotal\":20,\"baseTotal\":64,\"baseCoreTotal\":20,\"revivedIssued\":0,\"perfect\":33,\"corePerfect\":12,\"good\":0,\"miss\":0,\"dotMiss\":12,\"combo\":0,\"maxCombo\":33,\"perfectRate\":0.515625,\"coreHitRate\":0.6,\"encounterObstacles\":33,\"encounterDots\":12,\"encounterTotal\":45,\"encounterPerfect\":33,\"encounterRate\":0.7333333333333333,\"dotsStomped\":0,\"dotsLive\":12,\"rank\":\"A\",\"hp\":{\"kick\":0,\"bass\":0,\"synth\":0},\"disassembled\":true,\"disassembledTracks\":[\"kick\",\"bass\",\"synth\"],\"disassembleBeat\":{\"kick\":51.24408888888888,\"bass\":77.23093333333333,\"synth\":78.76693333333333},\"freeOrder\":false,\"dots\":[{\"beat\":132,\"state\":\"expired\"},{\"beat\":133,\"state\":\"expired\"},{\"beat\":134,\"state\":\"expired\"},{\"beat\":135,\"state\":\"expired\"},{\"beat\":136,\"state\":\"expired\"},{\"beat\":137,\"state\":\"expired\"},{\"beat\":138,\"state\":\"expired\"},{\"beat\":139,\"state\":\"expired\"},{\"beat\":140,\"state\":\"expired\"},{\"beat\":141,\"state\":\"expired\"},{\"beat\":142,\"state\":\"expired\"},{\"beat\":143,\"state\":\"expired\"}]}",
+    "ui": "A L5 干扰 声部还原 · 全声部已拆解 → 寂静段走完 评级 Perfect 率 73.3% 谱面 Perfect 率 51.6% 核心命中率 60% 最高连击 33 MISS 0 光点 MISS 12 分母 = 本关可判定障碍 64（固定分母，与复活/重开无关） · PERFECT 33 · 核心 20 · 背景层不计入 评级口径 = （PERFECT 33 + 踩灭光点 0）/（实际遭遇障碍 33 + 进场光点 12）= 33/",
+    "uiChildren": 1,
+    "canvas": 1
+  },
+  "teardown": {
+    "before": {
+      "pending": 0,
+      "ignored": 0,
+      "listeners": 0
+    },
+    "after": {
+      "pending": 63,
+      "ignored": 64,
+      "canvas": 1,
+      "running": true,
+      "now": 75.97
+    }
+  },
+  "consoleErrorCount": 0,
+  "gameErrors": [],
+  "harnessErrors": [],
+  "networkFailures": [],
+  "consoleSample": [
+    "log: %c %c %c %c %c Phaser v3.90.0 (WebGL | Web Audio) %c https://phaser.io/v390 background: #ff0000 background: #ffff00 background: #00ff00 background: #00ffff color: #ffffff; background: #000000 background: transparent",
+    "warning: [save] localStorage 不可用（隐私模式或 iframe 分区） → 本次会话使用内存档，不阻断游戏（SAV-03）",
+    "log: %c %c %c %c %c Phaser v3.90.0 (WebGL | Web Audio) %c https://phaser.io/v390 background: #ff0000 background: #ffff00 background: #00ff00 background: #00ffff color: #ffffff; background: #000000 background: transparent",
+    "warning: [save] localStorage 不可用（隐私模式或 iframe 分区） → 本次会话使用内存档，不阻断游戏（SAV-03）",
+    "log: %c %c %c %c %c Phaser v3.90.0 (WebGL | Web Audio) %c https://phaser.io/v390 background: #ff0000 background: #ffff00 background: #00ff00 background: #00ffff color: #ffffff; background: #000000 background: transparent",
+    "warning: [save] localStorage 不可用（隐私模式或 iframe 分区） → 本次会话使用内存档，不阻断游戏（SAV-03）"
+  ]
+}

@@ -314,6 +314,12 @@ export function calibrationAvailability(engine, runtime) {
   if (!st.ready) {
     return { ok: false, code: 'locked', reason: '音频还没解锁：先点一下页面或按任意键（解锁监听只在 main.js 一处，CR-11）' };
   }
+  // K-20：click 子总线接在 music → master 之后（TrackMixer 构造：每条 bus 都 connect 到 this.music），
+  // 所以主音量或音乐滑条归零时节拍器**出声但玩家听不到**，八拍全是盲敲 → 中位数会把一个假偏差写进 latencyOffset。
+  const vol = st.volumes || {};
+  if (Number(vol.master) === 0 || Number(vol.music) === 0) {
+    return { ok: false, code: 'silent', reason: `音量是 0（master ${vol.master} / music ${vol.music}）：节拍器放出来你也听不见 → 先把主音量/音乐拉起来，或用 ±1ms 微调` };
+  }
   if (runtime && runtime.paused) {
     return { ok: false, code: 'paused', reason: '关卡正停在暂停态：音频钟被挂起（clock.pause 是唯一权威，R11），拍子不会走 → 本次请用 ±1ms 微调，或回标题/结算后再打小游戏' };
   }
@@ -378,7 +384,7 @@ function isEnterKey(ev) {
  * 校准面板 = DOM + 会话生命周期 + 写入通道。**不自己碰存档**：写入一律回调 `opt.apply(ms)`
  * （UiLayer.applyLatency → judge.setLatency + updateSave({audio:{latencyOffset}})）。
  * @param {{engine?:object, cal?:{clock?:object,now?:Function,click?:Function},
- *   apply?:Function, getLatency?:Function, windows?:Function, availability?:object,
+ *   apply?:Function, getLatency?:Function, windows?:Function, availability?:object|Function,
  *   host?:object, uiSound?:Function, onBack?:Function, game?:object}} opt
  * @returns {{element:object,start:Function,stop:Function,dispose:Function,tap:Function,
  *   session:Function,render:Function,state:Function}}
@@ -388,7 +394,20 @@ export function createCalibrationPanel(opt = {}) {
   const cal = opt.cal || {};
   const host = opt.host !== undefined ? opt.host : typeof window !== 'undefined' ? window : null;
   const readLatency = typeof opt.getLatency === 'function' ? opt.getLatency : () => Number(opt.latencyMs) || 0;
-  const availability = opt.availability || { ok: true, code: 'ok', reason: '' };
+  // K-21：availability 允许传函数（宿主给的是「现读现算」的闭包）。面板每次 render/start 前重读一次，
+  // 于是「开着面板把主音量拉到 0」或「关卡中途被暂停」都不会被建面板时的那一份快照冻住。
+  // 传对象仍然照旧工作（contractTest 与旧调用点不改），只是每次都返回同一个值。
+  const readAvailability = typeof opt.availability === 'function' ? opt.availability : () => opt.availability;
+  let availability = normalizeAvailability(readAvailability());
+
+  function normalizeAvailability(v) {
+    return v && typeof v === 'object' ? v : { ok: false, code: 'no-engine', reason: '可用性读取没给结果（availability 返回空）→ 只能用 ±1ms 微调' };
+  }
+
+  function refreshAvailability() {
+    availability = normalizeAvailability(readAvailability());
+    return availability;
+  }
 
   const clickSink = cal.click ? { play: cal.click, begin: () => {}, end: () => {} } : makeEngineClick(opt.engine);
   const nowSource = cal.now || (() => (opt.engine && opt.engine.ctx && Number.isFinite(opt.engine.ctx.currentTime) ? opt.engine.ctx.currentTime : Number.NaN));
@@ -466,7 +485,7 @@ export function createCalibrationPanel(opt = {}) {
   /* ---- 会话 ---- */
 
   function start() {
-    if (!availability.ok) {
+    if (!refreshAvailability().ok) {
       phase = 'idle';
       render();
       return false;
@@ -578,6 +597,7 @@ export function createCalibrationPanel(opt = {}) {
   /* ---- 渲染 ---- */
 
   function render() {
+    refreshAvailability(); // K-21：界面每次刷新都重读可用性（音量、暂停态可能已经被玩家改过）
     const cur = Number(readLatency()) || 0;
     currentEl.textContent = `${roundMs(cur)}ms`;
     latOut.textContent = `${roundMs(cur)}ms`;

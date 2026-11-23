@@ -132,6 +132,22 @@ export function mountRoot(deps = {}) {
   return d && typeof d.getElementById === 'function' ? d.getElementById('ui-root') : null;
 }
 
+/**
+ * PERF-05③「降低闪烁」的 CSS 侧通路：只写一个 data 属性，规则本体在 neon.css 的
+ * `:root[data-rb-flash='reduce']`（这里不出现任何样式值/颜色 → CR-13 的色值扫描不受影响）。
+ * 渲染容器那半边（canvas 里的碎裂 / vignette / 震屏 / 脉冲）走 `view.a11y`，两条读路互不依赖：
+ * 没有 DOM（Node 断言）时本函数返回 false，开关照样在 canvas 侧生效。
+ * @param {boolean} on
+ * @returns {boolean} 是否真的写到了文档上
+ */
+export function setFlashReduced(on) {
+  const d = doc();
+  const el = d && d.documentElement;
+  if (!el || typeof el.setAttribute !== 'function') return false;
+  el.setAttribute('data-rb-flash', on ? 'reduce' : 'full');
+  return true;
+}
+
 /** 事件流退订登记表（K-05 同款纪律：DOM 界面也不许留监听）。 */
 export function binder() {
   const offs = [];

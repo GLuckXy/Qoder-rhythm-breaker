@@ -310,6 +310,13 @@ export const BACKGROUND_CFG = {
   tierClearanceMinChars: 1.0,
   /** 地面线：按拍落刻度（拍域定位 → 变速关与障碍严格同步，见纪律 1） */
   ground: { tickEveryBeats: 1, tickHeight: 0.018, glowBeats: 0.25, lineWidthRatio: 1 },
+  /**
+   * 判定线的纵向跨度（相对**世界带高**）：上端从 HUD 带下沿再下沉 8%，下端穿过地面线再延伸 10%。
+   * 唯一真相在这里 —— Background.judgeLineGeometry 画它，theme.hudLayout(judgeLineRectOf) 用它自证
+   * 「HUD 不遮挡判定线」（UI-04 验收项）。两处若不同口径，门闸就会「画出来对、算出来错」。
+   */
+  judgeLineTopRatio: 0.08,
+  judgeLineBottomRatio: 0.1,
   /** 分区边界数（HUD/世界 与 世界/时间轴） */
   dividerCount: 2,
   /**
@@ -459,6 +466,65 @@ export const CORE_MARK = {
   alpha: 0.95,
   minLumaDelta: 40 // 灰度可辨门限（与 GRAY_CONTRAST_MIN 同值，断言交叉引用）
 };
+
+// ---------------------------------------------------------------------------
+// 5d · 无障碍开关（TIM-05 辅助线开关 / PERF-05③「降低闪烁」）—— 纯追加（T5）
+// ---------------------------------------------------------------------------
+
+/**
+ * save.options 的 `showTimelineGuides` / `reduceFlash` 自 R1 起就在档里，但**零消费者**（死开关）。
+ * 本轮把它们接进 `view.a11y`：渲染层每帧从 view 读一次（不是重新 buildView、也不是订阅），
+ * 所以设置里改完**下一帧就生效**，不必重开关卡。
+ *
+ * TIM-05 的口径（验收「关闭后无任何辅助线」）：
+ *   **辅助线 = 只做「时间 → 位置」映射的线** —— 地面拍刻度 / 拍网格 / 小节线 /
+ *   4 拍窗右界（= 上层出生线）/ 泳道基线 / 核心落点短线 / 对齐虚线。
+ *   判定线本体、分区线与分区底色是**棋盘**而不是读数辅助（VIS-02 分区、VIS-05 两层同 x、
+ *   PLR-01 角色锚点都靠它们），关掉后照画；障碍字形与网眼更不许动（PERF-05① 形状通道）。
+ */
+export const GUIDE_ALPHA_KEYS = Object.freeze(['beatTick', 'barLine', 'guideLine', 'spawnLine']);
+
+/**
+ * PERF-05③ 的削减表（`reduceFlash = true` 时生效；关着一律 ×1 ⇒ 与现状逐像素相同）。
+ * 为什么不是「全部归 0」：拆解三要素里**碎片 / 大字 / 粒子**走的是空间通道（位置 + 形状，
+ * 不闪不呼吸），必须原样留着当「非闪烁替代指示」（PRD:634 的冗余编码）—— 全关等于把
+ * DIS-04 的可见后果删了，玩家会以为按键没生效。真正的光敏风险来自**整屏周期性明暗**：
+ * 边缘脉冲（110BPM = 1.83Hz 的反复呼吸）、bloom（整幅同色叠印）、震屏（位移本身）。
+ * 所以归零的是这三项，重削的是 MISS 红边，而一次性、单调淡出的降饱和保持不动。
+ */
+export const FLASH_REDUCTION = Object.freeze({
+  edgePulseRange: 0, // 边缘脉冲的**可变**幅度 ×0（判定线不再每拍呼吸，亮度钉在底座 0.55）
+  vignetteAlpha: 0.25, // MISS 红边 ×0.25：留 1/4，「刚才那下是 MISS」仍读得出（归 0 会丢掉反馈）
+  bloom: 0, // bloom 强度与层数 ×0（VIS-04 本就把 bloom 列为可降级项）
+  shake: 0, // 震屏幅度 ×0：前庭 + 光敏双风险，且同一条 MISS 已由红边 + HUD 计数表达
+  desaturate: 1, // 降饱和：×1 = 不动（0.55 拍单调淡入淡出，一次拆解一次，不是频闪）
+  bigText: 1, // 大字「已拆解」：×1 = 不动（替代指示本体）
+  forceSafeScale: true // 强制吃 FX_TIMING.safeScale(=0.6)：vivid 档原本是 false，开了就得削减
+});
+
+/** 开关关闭 = 恒等（现状一像素不动）。`forceSafeScale:false` 表示尊重审美档原值。 */
+export const FLASH_NONE = Object.freeze({
+  edgePulseRange: 1,
+  vignetteAlpha: 1,
+  bloom: 1,
+  shake: 1,
+  desaturate: 1,
+  bigText: 1,
+  forceSafeScale: false
+});
+
+/**
+ * 归一化 a11y 字段（渲染层唯一的读侧）。默认值与 `save.js:33` 的默认档同取向：
+ * 辅助线开、不降闪烁。手写鸭子 view（Node 断言里遍地都是）没有 `a11y` 键时也走这里，
+ * 于是背景/时间轴永远拿得到布尔，不必到处 `?.`。
+ * @param {object|null} src view / view.a11y / save.options 三形态皆可
+ */
+export function a11yOf(src = null) {
+  const o = src && src.a11y ? src.a11y : src || {};
+  const reduceFlash = o.reduceFlash === true || o.reduceFlash === 'true';
+  const showTimelineGuides = o.showTimelineGuides === undefined ? true : o.showTimelineGuides !== false && o.showTimelineGuides !== 'false';
+  return { showTimelineGuides, reduceFlash, flash: reduceFlash ? FLASH_REDUCTION : FLASH_NONE };
+}
 
 // ---------------------------------------------------------------------------
 // 6 · 质量预设（C8 的「粒子与 bloom 上限」+ T16 审美候选）
@@ -615,6 +681,8 @@ const r6 = (n) => Math.round(n * 1e6) / 1e6;
  * @param {Record<string,number>} [opts.fontPx]
  * @param {Partial<typeof VIEW_RATIOS>} [opts.ratios] physics.js 可注入覆盖（不改值只转发）
  * @param {number} [opts.dpr] 仅记录，供截图端用
+ * @param {boolean} [opts.showTimelineGuides=true] TIM-05 辅助线开关 → `view.a11y`
+ * @param {boolean} [opts.reduceFlash=false] PERF-05③「降低闪烁」开关 → `view.a11y`
  */
 export function buildView(width, height, opts = {}) {
   // 允许三种调用：buildView(1920,1080,opts) / buildView({width,height,...}) / buildView({w,h,...})
@@ -706,6 +774,8 @@ export function buildView(width, height, opts = {}) {
     },
     spawnFadeBeats: MOTION.spawnFadeBeats,
     pulseDecayBeats: MOTION.edgePulseBeats,
+    /** TIM-05 / PERF-05③：两个存档开关的每帧读侧（追加字段，几何与分区不受影响） */
+    a11y: a11yOf(src),
     timeline: { ...TIMELINE_CFG },
     platformTierY: ratios.platformTiers.map((t) => r2(H * ratios.groundY - H * t)),
     fontPx,
@@ -792,6 +862,184 @@ export function cssTokens() {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// 7c · HUD 几何（UI-04 / DIS-09 / VIS-02 的「HUD 上 8%」）——纯计算，零 Phaser/DOM
+// ---------------------------------------------------------------------------
+
+/**
+ * 金边色：COLORS.bass（#ffd166，本身就是「金」）向 white 提亮 35%。
+ * 只走声部色↔white 轴（保色相）→ 不新增色相、不新增字面量（C8 纪律 3 / OBS-08）。
+ * 为什么**不**放进 COLORS / DERIVED / ALPHA：这三张表都被 cssTokens() 遍历，
+ * 加键 = 加 `--rb-*` token = 必须同步 neon.css（CORE 名下，T2 越界）。
+ * HUD 的几何与金边是 canvas 侧专用，DOM 一个都不消费 → 放这张独立冻结表，
+ * 唯一消费者 = render/HudLayer.js（左上连击的金数字）与 render/Background.js（判定线金边）。
+ */
+const HUD_GOLD_RGB = mixRgb(RAW.bass, RAW.white, 0.35);
+
+/**
+ * HUD 规格表（冻结）。带内一切尺寸都以**带高**为单位，所以任何视口下 HUD 都是等比缩放，
+ * 不会出现「1080p 摆得下、720p 字挤出带」——越带与否由 hudLayout 的 clearance 直接给出数值。
+ */
+export const HUD_CFG = Object.freeze({
+  /** DIS-09：连击 ≥ 10 → 判定线金色描边（纯表现；判定路径不许读这个数） */
+  goldComboMin: 10,
+  /** UI-04「耐久 ×3（格…）」的格数预算 = DIS-01 的 hp=4。实际画几格由快照的 hpMax 决定。 */
+  cellsBudget: 4,
+  /** 带内留白：左右 25% 带高、上下各 8% 带高 */
+  padXOfBand: 0.25,
+  padYOfBand: 0.08,
+  /** 三行耐久行的行间距：行高由恒等式 `3·rowH + 2·rowGap + 2·padY = 带高` 反解（不另立一份行高，避免两处口径） */
+  rowGapOfBand: 0.025,
+  /** 行内元素：格高 = 行高 × 0.62（永远不越行），宽高比 1.5（横条感，与声部形状无关——纯计数） */
+  cellHOfRow: 0.62,
+  cellAR: 1.5,
+  /** 格间距 / 声部名与格之间的间隙，都以「格高」为单位 */
+  cellGapOfCell: 0.22,
+  labelGapOfCell: 0.6,
+  /** 声部名列宽：3 个汉字（最宽 name = 「合成器」）× 0.62em + 余量 */
+  labelChars: 3,
+  labelWOfFont: 2.1,
+  /** 「已拆解」标记字号 = 行高 × 0.72 */
+  markFontOfRow: 0.72,
+  /** 左右两块的宽度：连击块固定按带高，耐久块取「内容需要宽」与下限的较大者后右对齐 */
+  comboBlockWOfBand: 0.16,
+  hpBlockMinWOfBand: 0.16,
+  /** 连击数字字号 = 带高 × 0.52（题注取其 0.55 倍）；两者之和永不超过带内净高 */
+  numeralFontOfBand: 0.52,
+  numeralCaptionRatio: 0.55,
+  /** 数字/字符的推进宽度估算（等宽字体栈下 0.62em 足够保守） */
+  advanceOfFont: 0.62,
+  /** 连击数字最多显示到几位（≥9999 后按实际位数留宽，不再扩列，避免行块抖动） */
+  numeralMaxDigits: 4,
+  /** 金边描边：线宽 = 判定线宽 × k；辉光再加一圈 = k×2.6（reduceFlash 时整圈撤掉） */
+  goldStrokeScale: 2.4,
+  goldGlowScale: 5.2,
+  gold: Object.freeze({ hex: toHex(HUD_GOLD_RGB), int: toInt(HUD_GOLD_RGB), label: 'bass→white 35%（同色相提亮）' })
+});
+
+/** 判定线的实际线段矩形（Background.judgeLineGeometry 的纯数据版，HUD 用它自证不遮挡） */
+export function judgeLineRectOf(view) {
+  const v = resolveView(view);
+  const y0 = r2(v.zones.worldTop + v.zones.worldHeight * BACKGROUND_CFG.judgeLineTopRatio);
+  const y1 = r2(v.groundY + v.zones.worldHeight * BACKGROUND_CFG.judgeLineBottomRatio);
+  const half = r2(Math.max(1, v.sizes.judgeLineWidth) / 2);
+  return { x: r2(v.judgeX - half), y: y0, w: r2(half * 2), h: r2(y1 - y0), x0: r2(v.judgeX), y0, y1 };
+}
+
+/** 带内净高：上下留白之后剩下的可放内容高度 */
+function hudInnerH(bandH) {
+  return r2(bandH - 2 * r2(bandH * HUD_CFG.padYOfBand));
+}
+
+/**
+ * UI-04 的唯一几何口径：把「左上连击 / 右上三声部耐久 ×3 / 顶部 8% 高度带」换算成像素矩形。
+ *
+ * 纯函数：只读 view（zones / sizes / a11y / 视口尺寸），不碰 Phaser、不碰 DOM、不读时钟、不读存档。
+ * 传非 view 的 {width,height} 也认（resolveView 幂等），所以 Node 门闸可以直接 drive。
+ *
+ * @param {object} view buildView 的产物（或 {width,height,...}）
+ * @returns {Readonly<{band:object, combo:object, hpRows:object[], clearance:number, judgeLine:object}>}
+ *   `clearance` = HUD 底边到判定线顶边的净空（px）。**> 0 就是「不遮挡判定线」的数值证明**，
+ *   其恒等于 世界高 × judgeLineTopRatio（与视口线性相关，1080p=51.84 / 720p=34.56 / 1440p=69.12）。
+ */
+export function hudLayout(view) {
+  const v = resolveView(view);
+  const cfg = HUD_CFG;
+  const band = { x: 0, y: r2(v.zones.hudTop), w: r2(v.width), h: r2(v.zones.hudHeight) };
+  const padX = r2(band.h * cfg.padXOfBand);
+  const padY = r2(band.h * cfg.padYOfBand);
+  // 带内硬夹：任何视口（含 PRD 支持范围 1280×720–2560×1440 之外的极小窗口）都保证
+  // 「返回的每个矩形都在 8% 带内」。极小带高时相邻文字盒会贴到一起（可接受的观感代价），
+  // 但「越带 = 遮到世界/判定线」在数学上不可能发生 —— UI-04 的验收项靠这一句成立。
+  const inBand = (y, h) => r2(Math.max(band.y, Math.min(y, band.y + band.h - h)));
+  const innerH = hudInnerH(band.h);
+  const rowGap = r2(band.h * cfg.rowGapOfBand);
+  const rowH = r2((innerH - 2 * rowGap) / 3);
+
+  const cellH = r2(Math.min(rowH * cfg.cellHOfRow, rowH));
+  const cellW = r2(cellH * cfg.cellAR);
+  const cellGap = r2(cellW * cfg.cellGapOfCell);
+  const cellsW = r2(cfg.cellsBudget * cellW + (cfg.cellsBudget - 1) * cellGap);
+  const rowFont = r2(Math.max(FONT_MIN_PX, Math.min(rowH, v.fontPx ? v.fontPx.sub : FONT_TIERS.sub)));
+  const labelW = r2(rowFont * cfg.labelWOfFont);
+  const markFont = r2(Math.max(FONT_MIN_PX, rowH * cfg.markFontOfRow));
+  const markW = r2(cfg.labelChars * markFont * cfg.advanceOfFont + cellGap);
+  const labelGap = r2(cellH * cfg.labelGapOfCell);
+
+  // ── 左块（连击）：数字 + 题注，总高不超过带内净高，缩到放不下时按同比例压回 ──
+  let numeralFont = r2(Math.max(FONT_MIN_PX, band.h * cfg.numeralFontOfBand));
+  let captionFont = r2(Math.max(FONT_MIN_PX, numeralFont * cfg.numeralCaptionRatio));
+  if (numeralFont + captionFont > innerH) {
+    const k = innerH / (numeralFont + captionFont);
+    numeralFont = r2(Math.max(FONT_MIN_PX, numeralFont * k));
+    captionFont = r2(Math.max(FONT_MIN_PX * 0.6, captionFont * k));
+  }
+  const comboW = r2(Math.max(band.h * cfg.comboBlockWOfBand, numeralFont * cfg.advanceOfFont * cfg.numeralMaxDigits));
+  const comboBlock = { x: padX, y: padY, w: comboW, h: innerH };
+  const numeral = {
+    x: padX,
+    y: inBand(padY + Math.max(0, (innerH - numeralFont - captionFont) / 2), numeralFont),
+    w: comboW,
+    h: numeralFont,
+    fontPx: numeralFont
+  };
+  const caption = {
+    x: padX,
+    y: inBand(numeral.y + numeralFont + Math.min(r2(band.h * 0.04), r2(captionFont * 0.3)), captionFont),
+    w: comboW,
+    h: captionFont,
+    fontPx: captionFont
+  };
+
+  // ── 右块（三声部耐久）：内容需要宽与下限取大，再右对齐到带内 ──
+  const rowsNeed = r2(labelW + labelGap + cellsW + labelGap * 2 + markW);
+  const rowsW = r2(Math.max(rowsNeed, band.h * cfg.hpBlockMinWOfBand));
+  const rowsX = r2(band.w - padX - rowsW);
+  const hpRows = TRACKS.map((track, i) => {
+    const y = r2(padY + i * (rowH + rowGap));
+    const cells = [];
+    for (let c = 0; c < cfg.cellsBudget; c++) {
+      cells.push({
+        i: c,
+        x: r2(rowsX + labelW + labelGap + c * (cellW + cellGap)),
+        y: r2(y + (rowH - cellH) / 2),
+        w: cellW,
+        h: cellH
+      });
+    }
+    return {
+      track,
+      name: VOICE_NAME[track],
+      x: rowsX,
+      y,
+      w: rowsW,
+      h: rowH,
+      label: { x: rowsX, y: inBand(y + (rowH - rowFont) / 2, rowFont), w: r2(labelW), h: rowFont, fontPx: rowFont },
+      cells,
+      cellSize: { w: cellW, h: cellH },
+      mark: { x: r2(rowsX + rowsW - markW), y: inBand(y + (rowH - markFont) / 2, markFont), w: markW, h: markFont, fontPx: markFont }
+    };
+  });
+
+  const line = judgeLineRectOf(v);
+  return Object.freeze({
+    version: 'hud-layout/v1',
+    band,
+    comboBlock,
+    combo: numeral,
+    comboCaption: caption,
+    hpRows,
+    fonts: { numeral: numeralFont, caption: captionFont, row: rowFont, mark: markFont },
+    metrics: { padX, padY, innerH, rowH, rowGap, cellW, cellH, cellGap, labelW, markW, rowsW },
+    judgeLine: line,
+    /** HUD 底边 → 判定线顶边的净空（px）：> 0 = 验收项「不遮挡判定线」的数值证明 */
+    clearance: r2(line.y - (band.y + band.h)),
+    /** 耐久块左界 − 连击块右界：> 0 = 左右两块互不重叠 */
+    blockGap: r2(rowsX - (padX + comboW)),
+    a11y: { reduceFlash: !!v.a11y?.reduceFlash, goldComboMin: cfg.goldComboMin }
+  });
+}
+
 export default {
   THEME_VERSION,
   COLORS,
@@ -809,6 +1057,9 @@ export default {
   ALPHA,
   FONT_TIERS,
   MOTION,
+  HUD_CFG,
+  hudLayout,
+  judgeLineRectOf,
   QUALITY_CAPS,
   QUALITY_PRESETS,
   DEFAULT_QUALITY,

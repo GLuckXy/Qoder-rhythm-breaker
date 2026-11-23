@@ -136,6 +136,48 @@ function bestRank(a, b) {
   return (RANK_ORDER[a] ?? 0) >= (RANK_ORDER[b] ?? 0) ? a ?? b : b;
 }
 
+/**
+ * SAV-01「最高评级 / 最高 Perfect 率 / 最高连击」的唯一合并规则（DEF-09）。
+ * 两个方向都成立：新档更好就取新，老档更好就留老；`miss` 不在 §5.11 的「最高」清单里，
+ * 所以保持原语义 = 最近一局的数（不做 min，免得把「这一局打了几次空」这种观测值改成历史最优）。
+ * @param {object|undefined} prev 存档里已有的条目
+ * @param {object|undefined} entry 本局要写入的条目
+ */
+export function mergeLevelPair(prev, entry) {
+  if (!prev) return mergeLevelEntry(entry);
+  if (!entry) return prev;
+  const a = mergeLevelEntry(entry);
+  const b = mergeLevelEntry(prev);
+  return {
+    cleared: a.cleared || b.cleared,
+    rank: bestRank(a.rank, b.rank),
+    perfectRate: Math.max(a.perfectRate, b.perfectRate),
+    maxCombo: Math.max(a.maxCombo, b.maxCombo),
+    miss: a.miss,
+    encounterRate: Math.max(a.encounterRate, b.encounterRate)
+  };
+}
+
+/**
+ * DEF-09：把 patch 里带进来的关卡条目先与**存档中已有的**做 best-of 合并。
+ * 不做这一步的话 `deepMerge` 会整份替换 `levels[key]`，第二局打得差就把 S 冲成 B ——
+ * 而 PRD:287 的 SAV-01 验收写的就是「最高评级」。`mergeSave` 里那段 best-of 分支救不了：
+ * 它在一次调用内 `out.levels` 从空表开始，同一 key 永远只会被赋值一次，是条走不到的路。
+ */
+function levelsBestOf(base, next) {
+  if (!next || typeof next !== 'object' || !next.levels || typeof next.levels !== 'object') return next;
+  const prevLevels = base && base.levels ? base.levels : {};
+  const levels = {};
+  for (const key of Object.keys(next.levels)) {
+    if (!/^\d{1,3}$/.test(key)) {
+      levels[key] = next.levels[key];
+      continue;
+    }
+    levels[key] = mergeLevelPair(prevLevels[key], next.levels[key]);
+  }
+  return { ...next, levels };
+}
+
 function deepMerge(target, source) {
   const out = { ...target };
   if (!source || typeof source !== 'object') return out;
@@ -160,6 +202,13 @@ let degraded = false;
 let notice = null;
 let timer = null;
 let boundStorage = null;
+let lifecycleBound = false;
+/* DEF-08：本会话曾经「读不到存储」——此刻内存里的 current 是默认档而不是玩家的档，
+ * 直接落盘会把磁盘上真实存在的进度整份覆盖掉。所以：读不到时收到的 patch 先记账，
+ * 等存储可用了再以磁盘为准重放。 */
+let blind = false;
+let blindPatches = [];
+let replaying = false;
 
 function pickStorage(injected) {
   if (injected === null) return null;
@@ -188,8 +237,12 @@ export function flushSave(storage) {
   }
   const st = storage !== undefined ? pickStorage(storage) : boundStorage;
   if (!st) return false;
+  if (replaying) return false; // 重放期间不落盘，等最后那一笔正常写入一起带走
   try {
     st.setItem(SAVE_KEY, JSON.stringify(current ?? defaultSave()));
+    // 写得进去 = 存储其实是好的，不许继续挂着「内存档」的说法提示玩家
+    degraded = false;
+    notice = null;
     return true;
   } catch (err) {
     markDegraded(`localStorage 写入失败（${err?.name || 'Error'}）`);
@@ -206,6 +259,7 @@ export function loadSave(storage) {
   boundStorage = st;
   if (!st) {
     markDegraded('localStorage 不可用（隐私模式或 iframe 分区）');
+    blind = true;
     current = mergeSave(current ?? defaultSave());
     return current;
   }
@@ -214,9 +268,11 @@ export function loadSave(storage) {
     text = st.getItem(SAVE_KEY);
   } catch (err) {
     markDegraded(`localStorage 读取被拒（${err?.name || 'Error'}）`);
+    blind = true;
     current = mergeSave(current ?? defaultSave());
     return current;
   }
+  blind = false;
   if (text === null || text === undefined || text === '') {
     current = defaultSave();
     return current;
@@ -243,20 +299,53 @@ export function getSave(storage) {
  */
 export function updateSave(patch, opts = {}) {
   if (opts.storage !== undefined || boundStorage === null) boundStorage = pickStorage(opts.storage);
+  if (blind && boundStorage) {
+    // DEF-08：存储从「读不到」恢复了。此刻内存里的 current 可能是默认档，直接落盘会把磁盘上
+    // 真实存在的进度整份覆盖。所以先以磁盘为准重读，再把盲期内收到的 patch 原序重放。
+    const replay = blindPatches;
+    blindPatches = [];
+    loadSave(boundStorage);
+    if (!blind) {
+      degraded = false;
+      notice = null;
+      replaying = true;
+      try {
+        for (const p of replay) applyPatch(p, opts);
+      } finally {
+        replaying = false;
+      }
+      if (!blind) return applyPatch(patch, opts); // 触发恢复的这一笔本身也要落进去
+    }
+  }
+  return applyPatch(patch, opts);
+}
+
+/** 单次合并 + 排程（updateSave 的内部实现，DEF-08 重放时复用）。 */
+function applyPatch(patch, opts) {
   if (current === null) loadSave(boundStorage);
+  if (blind) blindPatches.push(patch); // 读不到存储：先记账，不落盘、不覆盖
   const base = current ?? defaultSave();
   let next = patch;
   if (typeof patch === 'function') {
-    const mutated = patch(deepMerge(base, {}));
+    // DEF-09：`deepMerge(base, {})` 其实是**浅**拷贝（source 没有键就不会递归），所以以前把 base
+    // 直接交给变异函数时，`s.levels['1'] = {...}` 会顺手改掉 base 自己 —— 于是「本局之前的值」
+    // 已经变成新值，best-of 合并无从比较，差局就把好局冲掉了。用 source=target 的写法拿真正的深拷贝。
+    const mutated = patch(deepMerge(base, base));
     next = mutated && typeof mutated === 'object' ? mutated : undefined;
   }
-  const merged = mergeSave(next === undefined ? base : deepMerge(base, next));
+  const merged = mergeSave(next === undefined ? base : levelsBestOf(base, deepMerge(base, next)));
   if (merged.meta.firstPlayedAt === 0 && opts.stampMeta !== false) {
     merged.meta.firstPlayedAt = opts.now ? opts.now() : Date.now();
   }
   current = merged;
+  if (replaying) return current; // 重放只更新内存态，落盘交给本次真正的写入
   const throttle = Number.isFinite(opts.throttleMs) ? Math.max(0, opts.throttleMs) : WRITE_THROTTLE_MS;
-  if (timer !== null) return current;
+  if (throttle > 0 && timer !== null) return current; // 已在节流窗口里，交给那个定时器
+  if (timer !== null) {
+    // DEF-07：终态写入（throttleMs=0）不许排在一串音量拖动后面——先取消待发的节流，立即落盘
+    clearTimeout(timer);
+    timer = null;
+  }
   if (throttle <= 0) {
     flushSave();
     return current;
@@ -309,6 +398,30 @@ export function __resetSaveState() {
   degraded = false;
   notice = null;
   boundStorage = null;
+  lifecycleBound = false;
+  blind = false;
+  blindPatches = [];
+  replaying = false;
+}
+
+/**
+ * 页面隐藏/卸载时把节流中的写入落盘（SAV-01「刷新页面不丢」的下限兜底）。
+ * 只在浏览器入口调一次；Node（门禁）里没有 window，直接返回 false。
+ * @param {{addEventListener?:Function, document?:object}} [target] 注入桩，供门禁断言用
+ */
+export function flushOnHide(target = null) {
+  const g = target ?? (typeof window !== 'undefined' ? window : null);
+  if (!g || typeof g.addEventListener !== 'function') return false;
+  if (lifecycleBound) return false;
+  lifecycleBound = true;
+  const onHide = () => {
+    if (timer !== null) flushSave();
+  };
+  g.addEventListener('pagehide', onHide);
+  g.addEventListener('visibilitychange', () => {
+    if (g.document?.visibilityState === 'hidden') onHide();
+  });
+  return true;
 }
 
 /** 便捷：某关的进度条目（缺省给默认值，不写回）。 */
@@ -330,6 +443,7 @@ export default {
   updateSave,
   writeSave,
   flushSave,
+  flushOnHide,
   resetSave,
   levelEntry,
   isDegraded,

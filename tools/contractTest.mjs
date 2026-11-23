@@ -688,7 +688,7 @@ async function casePhysics() {
 async function caseSave() {
   const sv = await load('src/data/save.js', 'save');
   if (!sv) return;
-  const { SAVE_KEY, SAVE_VERSION, defaultSave, mergeSave, loadSave, updateSave, flushSave, getSave, isDegraded, consumeNotice, levelEntry, __resetSaveState } = sv;
+  const { SAVE_KEY, SAVE_VERSION, defaultSave, mergeSave, loadSave, updateSave, writeSave, flushSave, getSave, isDegraded, consumeNotice, levelEntry, __resetSaveState } = sv;
 
   eq('save: 键名 = rhythm-breaker/save', SAVE_KEY, 'rhythm-breaker/save');
   eq('save: schema version = 1', SAVE_VERSION, 1);
@@ -804,6 +804,144 @@ async function caseSave() {
   updateSave({ meta: { totalRuns: 7 } }, { storage: stamp, throttleMs: 0 });
   eq('save: meta.totalRuns 可写', JSON.parse(stamp.map.get(SAVE_KEY)).meta.totalRuns, 7);
   ok('save: firstPlayedAt 被盖章（元数据，非时序路径）', JSON.parse(stamp.map.get(SAVE_KEY)).meta.firstPlayedAt > 0);
+
+  /* --- DEF-07：结算写档要「在结算出现时完成」（PRD:559），关页不许吞掉节流中的写入 --- */
+  {
+    const runtimeSrc = readFileSync(join(ROOT, 'src/game/scenes/LevelRuntime.js'), 'utf8');
+    const uiSrc = readFileSync(join(ROOT, 'src/ui/screens/UiLayer.js'), 'utf8');
+    const body = (runtimeSrc.match(/_writeSave\(stats\)\s*\{[\s\S]*?\n {2}\}/) || [''])[0];
+    ok('save: DEF-07 结算写档走立即落盘（throttleMs:0，PRD:559「写档在结算出现时完成」）', /throttleMs:\s*0/.test(body), body ? '命中 _writeSave 体' : '没匹配到 _writeSave 体（结构变了要一起改这里）');
+    const volBody = (uiSrc.match(/function applyVolumes[\s\S]*?\n {2}\}/) || [''])[0];
+    ok('save: DEF-07 音量写档仍保持节流（SAV-02 禁止每帧写，不能顺手全改成立即）', volBody.length > 0 && !/throttleMs:\s*0/.test(volBody), volBody.split('\n').length + ' 行');
+    ok('save: DEF-07 浏览器入口绑了关页兜底（main.js 调 flushOnHide）', /flushOnHide\(/.test(readFileSync(join(ROOT, 'src/main.js'), 'utf8')), '');
+  }
+  {
+    __resetSaveState();
+    const st = makeStubStorage();
+    updateSave({ audio: { master: 0.42 } }, { storage: st }); // 节流中，尚未落盘
+    eq('save: DEF-07 兜底前置态：节流窗口内磁盘还是空', st.writes, 0);
+    const handlers = {};
+    const win = { addEventListener: (t, f) => { (handlers[t] = handlers[t] || []).push(f); }, document: { visibilityState: 'visible' } };
+    eq('save: DEF-07 flushOnHide 注册成功', sv.flushOnHide(win), true);
+    eq('save: DEF-07 pagehide 与 visibilitychange 都要有（移动端切后台只发后者）', `${(handlers.pagehide || []).length}/${(handlers.visibilitychange || []).length}`, '1/1');
+    eq('save: DEF-07 重复绑定要拒绝（不出现第二次兜底写）', sv.flushOnHide(win), false);
+    win.document.visibilityState = 'hidden';
+    for (const f of handlers.visibilitychange) f();
+    eq('save: DEF-07 切后台即落盘（节流中的 0.42 不再随关页丢失）', JSON.parse(st.map.get(SAVE_KEY)).audio.master, 0.42);
+    eq('save: DEF-07 落盘后不留第二次写（timer 已清）', st.writes, 1);
+    const noWin = (() => {
+      __resetSaveState(); // 清掉 lifecycleBound，否则这条分不清是「没有 window」还是「已经绑过」
+      return sv.flushOnHide(null);
+    })();
+    eq('save: DEF-07 Node/无 window 环境不抛错，返回 false', noWin, false);
+  }
+
+  /* --- DEF-08：存储「先拒绝后可用」时，绝不允许拿默认档覆盖磁盘上的真存档 --- */
+  {
+    // 浏览器实测撞出来的场景（.agent/e2e/storageProbe.mjs）：headless Edge 首帧访问 localStorage 抛
+    // SecurityError，1.5s 后又正常可用。老实现把这次失败永久 latch 成「内存档」，
+    // 而后续写入会因为 boundStorage 仍是 null 被重新绑定 → 拿内存里的默认档 setItem 覆盖真存档。
+    __resetSaveState();
+    const diskBefore = { version: 1, levels: { 1: { cleared: true, rank: 'S', perfectRate: 0.95, maxCombo: 60, miss: 0 }, 2: { cleared: true, rank: 'A', perfectRate: 0.8, maxCombo: 40, miss: 1 } }, audio: { master: 0.25, latencyOffset: -12 }, meta: { totalRuns: 9 } };
+    const inner = makeStubStorage({ [SAVE_KEY]: JSON.stringify(diskBefore) });
+    let blocked = true;
+    const flaky = {
+      getItem(k) {
+        if (blocked) throw new Error('SecurityError');
+        return inner.getItem(k);
+      },
+      setItem(k, v) {
+        if (blocked) throw new Error('SecurityError');
+        return inner.setItem(k, v);
+      },
+      removeItem(k) {
+        return inner.removeItem(k);
+      }
+    };
+    updateSave((s) => {
+      s.levels[4] = { cleared: true, rank: 'A', perfectRate: 0.47, maxCombo: 39, miss: 0 };
+      return s;
+    }, { storage: flaky, throttleMs: 0 });
+    eq('save: DEF-08 被拒期间一次都不写盘', inner.writes, 0);
+    eq('save: DEF-08 被拒期间磁盘上的老档原样不动', JSON.parse(inner.map.get(SAVE_KEY)).levels['1'].rank, 'S');
+    ok('save: DEF-08 内存态仍带着本关成绩（游戏不崩、结算照常显示）', getSave().levels[4].rank === 'A', JSON.stringify(getSave().levels[4]));
+    blocked = false;
+    updateSave((s) => {
+      s.meta.totalRuns = (s.meta.totalRuns || 0) + 1;
+      return s;
+    }, { storage: flaky, throttleMs: 0 });
+    const after = JSON.parse(inner.map.get(SAVE_KEY));
+    eq('save: DEF-08 恢复后第 1 关成绩没有被默认档冲掉（这是数据丢失，不是降级）', after.levels['1'].rank, 'S');
+    eq('save: DEF-08 恢复后第 2 关也在', after.levels['2'].rank, 'A');
+    eq('save: DEF-08 盲期内的结算写入被重放回来了', after.levels['4'].rank, 'A');
+    eq('save: DEF-08 恢复后只落一次盘（重放不各自写一遍）', inner.writes, 1);
+    eq('save: DEF-08 磁盘上原有的音量设置回来了（不是内存里的出厂值）', after.audio.master, 0.25);
+    eq('save: DEF-08 磁盘上的 totalRuns 作底 + 本次 +1', after.meta.totalRuns, 10);
+    eq('save: DEF-08 存储恢复后不再谎报「内存档」', isDegraded(), false);
+    // 真·隐私模式（始终拒绝）必须仍然降级、不抛、不写
+    __resetSaveState();
+    const always = { getItem() { throw new Error('SecurityError'); }, setItem() { throw new Error('SecurityError'); } };
+    updateSave({ audio: { master: 0.9 } }, { storage: always, throttleMs: 0 });
+    ok('save: DEF-08 始终不可用 → 仍静默降级（SAV-03 口径没被顺手改坏）', isDegraded() === true && getSave().audio.master === 0.9, `degraded=${isDegraded()}`);
+  }
+
+  /* --- DEF-09：SAV-01 的「最高评级 / 最高 Perfect 率 / 最高连击」必须真的跨局成立 --- */
+  {
+    __resetSaveState();
+    const st = makeStubStorage();
+    writeSave({ levels: { 1: { cleared: true, rank: 'S', perfectRate: 0.9, maxCombo: 50, miss: 0, encounterRate: 0.95 } }, meta: { totalRuns: 7 } }, { storage: st });
+    eq('save: DEF-09 前置——磁盘上是一份 S 档', `${getSave(st).levels['1'].rank}/${st.writes}`, 'S/1');
+    // 与 LevelRuntime._writeSave 完全同构的写法（变异函数 + throttleMs:0），差一局不许把最好成绩冲掉
+    updateSave((s) => {
+      s.levels['1'] = { cleared: true, rank: 'B', perfectRate: 0.4, maxCombo: 20, miss: 3, encounterRate: 0.6 };
+      s.meta.totalRuns = (Number(s.meta.totalRuns) || 0) + 1;
+      return s;
+    }, { storage: st, throttleMs: 0 });
+    const worse = getSave().levels['1'];
+    eq('save: DEF-09 差局不许把最高评级冲成 B（PRD:287 SAV-01「最高评级」）', worse.rank, 'S');
+    eq('save: DEF-09 最高 Perfect 率 / 最高连击 / 遭遇口径同样取历史最优', `${worse.perfectRate}/${worse.maxCombo}/${worse.encounterRate}`, '0.9/50/0.95');
+    eq('save: DEF-09 miss 保持「最近一局」语义（SAV-01 没把它列进最高项）', worse.miss, 3);
+    eq('save: DEF-09 落盘与内存一致（不是只改了内存态）', JSON.parse(st.map.get(SAVE_KEY)).levels['1'].rank, 'S');
+    eq('save: DEF-09 totalRuns 这类计数照常累加（best-of 只作用于关卡条目）', getSave().meta.totalRuns, 8);
+    // 第二种触发形式：原地改子字段。以前传给变异函数的是浅拷贝，改克隆体等于改基线，比较对象自己变了
+    updateSave((s) => {
+      s.levels['1'].rank = 'C';
+      s.levels['1'].perfectRate = 0.1;
+      return s;
+    }, { storage: st, throttleMs: 0 });
+    eq('save: DEF-09 原地变异子字段也不许污染历史最好（深拷贝基线）', `${getSave().levels['1'].rank}/${getSave().levels['1'].perfectRate}`, 'S/0.9');
+    updateSave((s) => {
+      s.levels['1'] = { cleared: true, rank: 'A', perfectRate: 0.95, maxCombo: 60, miss: 1, encounterRate: 0.99 };
+      return s;
+    }, { storage: st, throttleMs: 0 });
+    const better = getSave().levels['1'];
+    eq('save: DEF-09 更好的局照常升档（best-of 不是「只认第一次」）', `${better.perfectRate}/${better.maxCombo}/${better.encounterRate}/${better.rank}`, '0.95/60/0.99/S');
+    updateSave({ levels: { 2: { cleared: true, rank: 'A', perfectRate: 0.7, maxCombo: 9, miss: 1, encounterRate: 0.8 } } }, { storage: st, throttleMs: 0 });
+    eq('save: DEF-09 新开的关不受影响', getSave().levels['2'].rank, 'A');
+    // 反向门禁：导入路径（writeSave）必须是整档替换，否则 SAV-04 的「导出码还原」会被 best-of 污染
+    __resetSaveState();
+    const st2 = makeStubStorage();
+    writeSave({ levels: { 1: { cleared: true, rank: 'S', perfectRate: 0.9, maxCombo: 50, miss: 0, encounterRate: 0.95 } } }, { storage: st2 });
+    __resetSaveState();
+    writeSave({ levels: { 1: { cleared: false, rank: 'B', perfectRate: 0.4, maxCombo: 20, miss: 9, encounterRate: 0.6 } } }, { storage: st2 });
+    eq('save: DEF-09 导入/覆盖写仍走整档替换（不许顺手 best-of，SAV-04 的前提）', JSON.stringify(getSave().levels['1']), '{"cleared":false,"rank":"B","perfectRate":0.4,"maxCombo":20,"miss":9,"encounterRate":0.6}');
+    ok('save: DEF-09 修的是 updateSave 路径里的浅拷贝基线（源码里别再退回去）', /patch\(deepMerge\(base, base\)\)/.test(readFileSync(join(ROOT, 'src/data/save.js'), 'utf8')), '');
+  }
+
+  /* --- DEF-07 补：终态写入要抢在音量节流之前落盘（不然还是等 500ms） --- */
+  {
+    __resetSaveState();
+    const st = makeStubStorage();
+    updateSave({ audio: { master: 0.5 } }, { storage: st }); // 起一个节流定时器
+    eq('save: DEF-07 音量写入先进节流窗（此时 0 次落盘）', st.writes, 0);
+    updateSave((s) => {
+      s.levels[6] = { cleared: true, rank: 'A' };
+      return s;
+    }, { storage: st, throttleMs: 0 });
+    eq('save: DEF-07 结算写入立刻落盘，不排在拖动后面', st.writes, 1);
+    const rec = JSON.parse(st.map.get(SAVE_KEY));
+    eq('save: DEF-07 这一次落盘把音量与成绩都带上了', `${rec.levels['6'].rank}/${rec.audio.master}`, 'A/0.5');
+  }
   eq('save: 重开不污染：merge 不丢 levels', (() => {
     __resetSaveState();
     const st2 = makeStubStorage();
@@ -1334,7 +1472,30 @@ async function caseReviveTie() {
   eq('revive-tie: 最近一次 hp 写入者 = onJudgment', ds.lastHpWriter(), 'onJudgment');
   const pick1 = ds.onMiss({ atSec: clock.timeAtBeat(40) });
   eq('revive-tie: MISS 复活 hp 最小者（kick）', pick1, 'kick');
-  eq('revive-tie: 复活后 hp → 1（不是满 hp，DIS-05）', ds.hp('kick'), 1);
+  eq('revive-tie: §7.2:342 的复活是「+1 夹到 hpMax」，不是「置为 1」（kick 2→3）', ds.hp('kick'), 3);
+  eq('revive-tie: 没被点名的声部不动（bass 仍 3 / synth 仍 4）', `${ds.hp('bass')}/${ds.hp('synth')}`, '3/4');
+  ok('revive-tie: MISS 永不让 hp 下降（旧写法 hp=1 会把 2 打到 1，白送一格拆解进度）', ds.hp('kick') >= 2, `kick=${ds.hp('kick')}`);
+  ds.reset();
+
+  // ②b PRD §7.2:342 「MISS（声部未全满）」那一格写的是「**其他**损失最大声部 +1」——
+  //     「其他」＝刚刚 MISS 的那条要踢出候选，否则越打不烂的声部越被优先补，MISS 自己补自己。
+  ds.onJudgment(judg('kick'));
+  ds.onJudgment(judg('kick'));
+  ds.onJudgment(judg('bass'));
+  eq('revive-tie: ②b 前置 kick2/bass3/synth4', JSON.stringify(ds.hpByTrack()), '{"kick":2,"bass":3,"synth":4}');
+  eq('revive-tie: ②b MISS 打在 kick（最受损）→ 补的是「其他」里最受损的 bass', ds.onMiss({ track: 'kick', atSec: clock.timeAtBeat(41) }), 'bass');
+  eq('revive-tie: ②b bass 3→4，kick 保持 2（打不烂的那条不给自己回血）', `${ds.hp('bass')}/${ds.hp('kick')}`, '4/2');
+  ds.reset();
+  ds.onJudgment(judg('kick'));
+  ds.onJudgment(judg('kick'));
+  ds.onJudgment(judg('kick'));
+  eq('revive-tie: ②b 前置：只剩 kick 受损（kick1，其余满）', JSON.stringify(ds.hpByTrack()), '{"kick":1,"bass":4,"synth":4}');
+  eq('revive-tie: ②b 「其他」为空时回落回自己（DIS-02 字面「MISS → 复活 1 点」，L1 单声部关因此仍有惩罚）', ds.onMiss({ track: 'kick', atSec: clock.timeAtBeat(41) }), 'kick');
+  eq('revive-tie: ②b 回落也走 +1（kick 1→2，不是 4）', ds.hp('kick'), 2);
+  ds.reset();
+  for (let i = 0; i < 4; i += 1) ds.onJudgment(judg('synth'));
+  eq('revive-tie: ②b 前置：synth 拆空（hp 0），kick/bass 满', JSON.stringify(ds.hpByTrack()), '{"kick":4,"bass":4,"synth":0}');
+  eq('revive-tie: ②b 打在满血声部上也会把已拆空的 synth 拉回 1（DIS-05 的 0→1 就是 before=0 的实例）', `${ds.onMiss({ track: 'kick', atSec: clock.timeAtBeat(41) })}/${ds.hp('synth')}`, 'synth/1');
   ds.reset();
 
   // ③ 并列口径 kick > bass > synth
@@ -1344,11 +1505,13 @@ async function caseReviveTie() {
   ds.onJudgment(judg('synth'));
   eq('revive-tie: 并列前置（bass2/synth2/kick4）', JSON.stringify(ds.hpByTrack()), '{"kick":4,"bass":2,"synth":2}');
   eq('revive-tie: bass/synth 并列 → 取 bass', ds.onMiss({ atSec: clock.timeAtBeat(42) }), 'bass');
+  eq('revive-tie: bass/synth 并列取 bass 后是 +1（bass 2→3，synth 仍 2）', `${ds.hp('bass')}/${ds.hp('synth')}`, '3/2');
   ds.reset();
   ds.onJudgment(judg('synth'));
   ds.onJudgment(judg('synth'));
-  ds.onMiss({ atSec: clock.timeAtBeat(42) });
-  eq('revive-tie: synth 独自最小 → 取 synth', ds.hp('synth'), 1);
+  eq('revive-tie: synth 独自最小 → 取 synth', ds.onMiss({ atSec: clock.timeAtBeat(42) }), 'synth');
+  eq('revive-tie: synth 独自最小 → +1（2→3）', ds.hp('synth'), 3);
+  ds.reset();
 
   // ④ 拆空 → 停止生成 → 复活只补当前拍之后（不补发历史）
   ds.reset();
@@ -1803,7 +1966,10 @@ async function caseIntegration() {
   eq('integration: 六关 JSON 全部就位', seenLevels.length, 6);
   for (const id of seenLevels) {
     const cfg = readLevel(id);
-    eq(`integration: L${id} windowScale 与关卡表一致`, `${cfg.windowScale}/${CFG.windowScaleFor(id)}`, `${CFG.WINDOW_SCALES[id - 1]}/${CFG.WINDOW_SCALES[id - 1]}`);
+    const jsonScale = Number(cfg.windowScale);
+    const tbl = CFG.WINDOW_SCALES[id - 1];
+    ok(`integration: L${id} windowScale 是个 0.5–1.5 之间的实数（区间体检，不当漂移报警用）`, Number.isFinite(jsonScale) && jsonScale >= 0.5 && jsonScale <= 1.5, `${jsonScale}`);
+    if (jsonScale !== tbl) note(`L${id} 的 JSON windowScale=${jsonScale} 与 config.js 表里的 ${tbl} 不同——这是 LVL-03 允许的正常改动，门禁不再要求两处手改同步。`);
     ok(`integration: L${id} 至少一个可拆解声部`, ['kick', 'bass', 'synth'].some((t) => (cfg.tracks[t] || {}).hp > 0));
     ok(`integration: L${id} bed 存在且 disassemble:false`, !!cfg.tracks.bed && cfg.tracks.bed.disassemble === false);
     eq(`integration: L${id} silenceBeats>0（K-11 有光点段）`, cfg.silenceBeats > 0, true);
@@ -1816,6 +1982,11 @@ async function caseIntegration() {
     eq(`integration: L${id} 分母只数 judgable!==false`, r.ds.total(), r.instances.filter((o) => o.judgable !== false).length);
     eq(`integration: L${id} bed 不进分母也不进核心数`, r.ds.coreTotal() <= r.ds.total(), true);
     eq(`integration: L${id} Judge 不入队 bed（ignoredCount = bed 数）`, r.judge.ignoredCount(), bed);
+    // LVL-03（PRD:245，M）「现场改一字段，刷新即生效」：只改 JSON 里那个数，判定窗必须跟着变。
+    // 这条取代了原来「JSON == config.js 表 == 字面量」的三处对齐断言——那种断言等于把重复固化成需求。
+    const probeCfg = { ...cfg, windowScale: 0.5 };
+    const probe = buildRig(PG, MC, JS, DS, probeCfg);
+    ok(`integration: L${id} 只改 JSON 的 windowScale → 判定窗随之收窄（LVL-03 刷新即生效）`, probe.judge.windows().perfectMs < r.judge.windows().perfectMs, `${r.judge.windows().perfectMs}→${probe.judge.windows().perfectMs}`);
   }
   const rig = buildRig(PG, MC, JS, DS, readLevel(6));
   rig.JS = JS;
@@ -1879,7 +2050,8 @@ async function caseScreens() {
   const PG = await load('src/game/systems/PatternGenerator.js', 'screens');
   const UI = await load('src/ui/screens/UiLayer.js', 'screens');
   const SAVE = await load('src/data/save.js', 'screens');
-  if (!MC || !JS || !DS || !PG || !UI || !SAVE) return;
+  const THEME = await load('src/data/theme.js', 'screens');
+  if (!MC || !JS || !DS || !PG || !UI || !SAVE || !THEME) return;
 
   const levels = [1, 2, 3]
     .map(readLevel)
@@ -1969,6 +2141,23 @@ async function caseScreens() {
     await flushMicrotasks();
     eq('screens: 标题 → 选关（同一时刻只许一层面板）', `${ui.current()}/${dom.uiRoot.childNodes.length}`, 'select/1');
     eq('screens: 选关卡片数 = 关卡清单长度', levels.filter((lv) => Boolean(findByRole(ui.element(), `pick-${lv.id}`))).length, levels.length);
+
+    /* UI-03（PRD:264「徽章随存档刷新」）：此前这一屏只数了卡片，写进存档的成绩到底有没有上屏没人管 */
+    {
+      const lv = levels[0];
+      const other = levels[1];
+      SAVE.updateSave({ levels: { [String(lv.id)]: { cleared: true, rank: 'S', perfectRate: 0.91, maxCombo: 40, miss: 0, encounterRate: 0.93 } } });
+      await ui.showSelect();
+      const txt = textOf(ui.element()).join('|');
+      ok('screens: UI-03 存档写入后，选关页立刻出现「已通关 S」徽章（不是只有对勾）', txt.includes(`已通关 ${'S'}`), txt.slice(0, 160));
+      ok('screens: UI-03 没打过的关仍显示「未通关」（徽章不是全局开关）', txt.includes('未通关'), txt.slice(0, 160));
+      ok('screens: UI-03 徽章节点用的是 badge-cleared / 未通关用 badge-todo（两种状态可分辨）', Boolean(findByRole(ui.element(), 'badge-cleared')) && Boolean(findByRole(ui.element(), 'badge-todo')), '');
+      SAVE.updateSave({ levels: { [String(other.id)]: { cleared: true, rank: 'B', perfectRate: 0.31, maxCombo: 8, miss: 4, encounterRate: 0.4 } } });
+      await ui.showSelect();
+      const txt2 = textOf(ui.element()).join('|');
+      ok('screens: UI-03 换一局写档 → 徽章跟着刷新（不是首次渲染就冻住）', txt2.includes('已通关 B') && txt2.includes('已通关 S'), txt2.slice(0, 200));
+      SAVE.__resetSaveState(); // 本 case 不依赖存储；清干净，别把状态留给后面的界面断言
+    }
     findByRole(ui.element(), `pick-${levels[1].id}`).click();
     eq('screens: 选卡 → gotoLevel(该关 id)', route[route.length - 1], `goto:${levels[1].id}`);
     route.length = 0;
@@ -2033,6 +2222,47 @@ async function caseScreens() {
     eq('screens: 延迟钳位在 CALIBRATION.maxMs（200ms）', rig.judge.getLatency(), 200);
     const saved = SAVE.getSave();
     eq('screens: 音量 / 延迟 / 严格窗口都落进存档', `${saved.audio.master}/${saved.audio.music}/${saved.audio.sfx}/${saved.audio.latencyOffset}/${saved.options.strictWindow}`, '0.35/0.6/0.7/200/true');
+
+    /* ④b TIM-05 / PERF-05③（R13c）：这两个开关以前是「写进档没人读」的假开关。
+       两头都钉：UI 拨 → 落档 → 渲染层入口拿到的表真的变 → 消费者在 LevelRuntime 里现算。 */
+    await ui.showSettings('title');
+    const guidesBox = findByRole(ui.element(), 'opt-guides');
+    const flashBox = findByRole(ui.element(), 'opt-reduce-flash');
+    eq('screens: 设置页两个无障碍开关都在（TIM-05 辅助线 / PERF-05③ 降低闪烁）', `${Boolean(guidesBox)}/${Boolean(flashBox)}`, 'true/true');
+    guidesBox.checked = false;
+    fire(guidesBox, 'change', { target: guidesBox });
+    flashBox.checked = true;
+    fire(flashBox, 'change', { target: flashBox });
+    const a11ySaved = SAVE.getSave().options;
+    eq('screens: 拨开关真的写进存档（不是只改 UI 状态）', `${a11ySaved.showTimelineGuides}/${a11ySaved.reduceFlash}`, 'false/true');
+    await ui.showSettings('title');
+    const echoAttr = (role) => { const el = findByRole(ui.element(), role); const v = el && el.getAttribute('checked'); return v !== null && v !== undefined; };
+    eq('screens: 重开面板按存档回显（不是回到出厂默认）', `${echoAttr('opt-guides')}/${echoAttr('opt-reduce-flash')}`, 'false/true');
+    const viewA11y = THEME.a11yOf(SAVE.getSave().options);
+    eq('screens: 开了降闪烁 → 震屏/bloom/边缘脉冲归零、MISS 红边留 1/4', `${viewA11y.showTimelineGuides}/${viewA11y.reduceFlash}/${viewA11y.flash.shake}/${viewA11y.flash.bloom}/${viewA11y.flash.edgePulseRange}/${viewA11y.flash.vignetteAlpha}`, 'false/true/0/0/0/0.25');
+    ok('screens: 降闪烁不许顺手删掉 DIS-04 的可见后果（碎裂/大字/降饱和是替代指示，×1 不动）', `${THEME.a11yOf({ reduceFlash: true }).flash.desaturate}/${THEME.a11yOf({ reduceFlash: true }).flash.bigText}`, '1/1');
+    eq('screens: 开关全关 = 恒等表（出厂表现一像素不动）', Object.values(THEME.FLASH_NONE).every((v) => v === 1 || v === false), true);
+    eq('screens: 鸭子 view 没有 a11y 键时也走归一化（渲染层不必到处 ?.，老断言不炸）', `${THEME.a11yOf(null).showTimelineGuides}/${THEME.a11yOf({ a11y: { showTimelineGuides: false } }).showTimelineGuides}`, 'true/false');
+    eq('screens: LevelRuntime 建 view 与每帧同步各从存档现算一次（TIM-05 的真消费者）', (readFileSync(join(ROOT, 'src/game/scenes/LevelRuntime.js'), 'utf8').match(/a11yOf\(getSave\(\)\.options\)/g) || []).length, 2);
+    eq('screens: UiLayer 的开关写口只有 updateSave 这一条（SAV-02 不许另起写盘路径）', /function applyOption[\s\S]{0,420}?updateSave\(\(s\) =>/.test(readFileSync(join(ROOT, 'src/ui/screens/UiLayer.js'), 'utf8')), true);
+    guidesBox.checked = true;
+    fire(guidesBox, 'change', { target: guidesBox });
+    flashBox.checked = false;
+    fire(flashBox, 'change', { target: flashBox });
+    eq('screens: 开关能还原（默认=辅助线开、不降闪烁）', (() => { const o = SAVE.getSave().options; return `${o.showTimelineGuides}/${o.reduceFlash}`; })(), 'true/false');
+
+    /* ④c UI-04 / DIS-09（R13c）：HUD 布局的纯函数口径——8% 带高、不遮判定线、两块互不重叠。 */
+    const hudAt = (w, h) => THEME.hudLayout({ width: w, height: h });
+    for (const [w, h] of [[1920, 1080], [1280, 720], [2560, 1440]]) {
+      const L = hudAt(w, h);
+      eq(`screens: HUD 带高 = 8%·H（${w}×${h}）`, L.band.h, Math.round(h * 0.08 * 100) / 100);
+      ok(`screens: HUD 不遮判定线（${w}×${h} clearance>0）`, L.clearance > 0, `clearance=${L.clearance}`);
+      ok(`screens: 连击块与耐久块互不重叠（${w}×${h} blockGap>0）`, L.blockGap > 0, `blockGap=${L.blockGap}`);
+      eq(`screens: 三声部耐久行（${w}×${h}）`, L.hpRows.length, 3);
+      ok(`screens: 所有 HUD 矩形都在 8% 带内（${w}×${h}）`, L.comboBlock.y + L.comboBlock.h <= L.band.h + 1e-6, `comboBlock bottom=${L.comboBlock.y + L.comboBlock.h} band=${L.band.h}`);
+    }
+    eq('screens: Background.js 的金边描边是状态驱动（combo ≥ goldComboMin），不读时钟', /Number\(frame\.combo\)\s*>=\s*HUD_CFG\.goldComboMin/.test(readFileSync(join(ROOT, 'src/game/render/Background.js'), 'utf8')), true);
+    ok('screens: 金边描边路径无 performance.now / Date.now / setTimeout / scene.time / 60÷bpm', !/performance\.now|Date\.now|setTimeout|scene\.time|60\s*\/\s*bpm/.test(readFileSync(join(ROOT, 'src/game/render/Background.js'), 'utf8')), '');
 
     /* ⑤ 结算（分母 = 可判定障碍，不含 bed） */
     playRig(rig, { stomp: true });
@@ -2104,6 +2334,536 @@ async function caseScreens() {
     ui.destroy();
     dom.restore();
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* case: latency — K-14 校准小游戏（中位数口径 + 持久化）+ `ui` 音效接线 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 这一关把「校准」这件事从头到尾钉住，七组断言：
+ * ① 取中位数而不是均值（故意塞 +250ms 离群样本，验证不被带跑）
+ * ② 丢弃前 2 次热身样本
+ * ③ 样本不足 → 拒绝写入 + 给看得懂的提示
+ * ④ 越界夹紧到存档允许的 ±200ms（与 save schema 同一口径）
+ * ⑤ 写入只走 updateSave，存档里 latencyOffset 立刻读得回来，并即时经 judge.setLatency 生效
+ * ⑥ `ui` 音效的触发点在 Sfx 自检表里有登记，且五个界面每一层都真的按到了
+ * ⑦ JDG-09 的验收口径本身：+60ms 系统偏差经校准后 Perfect 率要回到基准 ±3pp 以内
+ * 另外把两条纪律扫一遍：T4（本 case 的代码不许用真实时间；界面文件同样不许）与 CR-11（音频解锁单点、
+ * 界面里不许第二个 AudioContext）。
+ */
+async function caseLatency() {
+  const CB = await load('src/ui/Calibration.js', 'latency');
+  const CFG = await load('src/data/config.js', 'latency');
+  const MC = await load('src/mocks/MockClock.js', 'latency');
+  const JS = await load('src/game/systems/JudgeSystem.js', 'latency');
+  const UI = await load('src/ui/screens/UiLayer.js', 'latency');
+  const SAVE = await load('src/data/save.js', 'latency');
+  const SF = await load('src/audio/Sfx.js', 'latency');
+  if (!CB || !CFG || !MC || !JS || !UI || !SAVE || !SF) return;
+
+  const G = CFG.CALIB_GAME;
+  const { median, mean, roundMs, dropWarmup, summarize, createCalibrationSession, calibrationAvailability } = CB;
+  const { MockClock } = MC;
+
+  /* ---------------- ① ② ④ 纯函数层（中位数 / 热身 / 夹紧） ---------------- */
+  eq('latency: ① 中位数取正中（奇数个样本）', median([2, 1, 3, 5, 4]), 3);
+  eq('latency: ① 中位数取中间两值平均（偶数个样本）', median([1, 2, 3, 4]), 2.5);
+  eq('latency: 中位数对空样本给 NaN，不给 0（0 会被当成「已经校准过了」）', Number.isNaN(median([])), true);
+  {
+    const late = [-2, -1.5, -1, 0, 1, 1.5, 120]; // 最后一下走神，晚了 120ms
+    near('latency: ① 离群点没把中位数带走', median(late), 0, 1e-9, 'ms');
+    near('latency: ① 同一批样本的均值被离群点拖到 +16.9ms（这就是不用均值的原因）', mean(late), 16.857, 0.01, 'ms');
+    ok('latency: ① 中位数与均值确实是两个数（差 > 10ms）', Math.abs(median(late) - mean(late)) > 10, `中位数 ${median(late)} / 均值 ${mean(late).toFixed(3)}`);
+  }
+  eq('latency: ② dropWarmup 丢掉前 2 次敲击', dropWarmup([1, 2, 3, 4, 5], 2).join(','), '3,4,5');
+  eq('latency: ② dropWarmup 对空输入不抛', dropWarmup([], 2).length, 0);
+  eq('latency: 校准参数 = 打 8 下（JDG-09 原文如此）+ 丢 2 下热身（实现补充，原文只写了「取中位数」）', `${G.beats}/${G.warmupBeats}`, '8/2');
+  near('latency: 写入精度收到 0.1ms（存档/DebugPanel 也只显示到这一位）', roundMs(1.234), 1.2, 1e-9, 'ms');
+  {
+    const s = summarize(
+      [
+        { deltaMs: -30 }, { deltaMs: -25 }, // 热身两次
+        { deltaMs: 12 }, { deltaMs: 10 }, { deltaMs: 11 }, { deltaMs: 9 }, { deltaMs: 13 }, { deltaMs: 250 }
+      ],
+      { warmup: G.warmupBeats, minSamples: G.minSamples, beats: G.beats }
+    );
+    eq('latency: ①② 结算的样本账目 = 共 8 / 丢 2 / 用 6', `${s.taps}/${s.dropped}/${s.used}`, '8/2/6');
+    eq('latency: ① 写进去的是中位数 11.5ms', s.appliedMs, 11.5);
+    ok('latency: ① 均值（50.8ms）只作为对照量显示，没被写进任何地方', s.meanMs > 50 && s.appliedMs === s.medianMs && s.meanMs !== s.appliedMs, `median=${s.medianMs} mean=${s.meanMs.toFixed(2)} applied=${s.appliedMs}`);
+    ok('latency: 稳定度 = IQR，且离群点只影响一个四分位（2.5ms，判稳）', s.iqrMs === 2.5 && s.stable === true, `IQR=${s.iqrMs} stable=${s.stable}`);
+    ok('latency: ① 提示文案里同时给出中位数与均值（玩家看得见为什么写这个数）', s.reason.includes('中位数 11.5') && s.reason.includes('均值'), s.reason);
+  }
+  {
+    const big = summarize([1, 1, 250, 255, 260, 265, 270, 300], { warmup: 2, minSamples: 4, beats: 8 });
+    eq('latency: ④ 正向越界 → 夹紧到存档允许的 +200ms', `${big.appliedMs}/${big.clamped}`, '200/true');
+    ok('latency: ④ 夹紧的提示写明了允许区间 -200..200', big.reason.includes('-200..200'), big.reason);
+    const neg = summarize([1, 1, -260, -250, -255, -245, -240, -300], { warmup: 2, minSamples: 4, beats: 8 });
+    eq('latency: ④ 负向越界 → 夹紧到 -200ms', `${neg.appliedMs}/${neg.clamped}`, '-200/true');
+    ok('latency: ④ 夹紧不改中位数本身（只改待写值）', neg.medianMs === -252.5, `median=${neg.medianMs}`);
+  }
+  {
+    const few = summarize([{ deltaMs: 1 }, { deltaMs: 2 }, { deltaMs: 3 }], { warmup: 2, minSamples: 4, beats: 8 });
+    eq('latency: ③ 样本不足 → 拒绝写入（accepted:false）', few.accepted, false);
+    eq('latency: ③ 样本不足时待写值是 0，不是脏中位数', few.appliedMs, 0);
+    ok('latency: ③ 样本不足的提示看得懂（说清还剩几个、要几个、怎么办）', few.reason.includes('样本不足') && few.reason.includes('4') && few.reason.includes('打满'), few.reason);
+    eq('latency: ③ 边界：热身后正好 minSamples 个 → 允许写入', summarize([1, 1, 10, 11, 12, 13], { warmup: 2, minSamples: 4, beats: 8 }).accepted, true);
+    eq('latency: ③ 边界：热身后只剩 3 个 → 拒绝', summarize([1, 1, 10, 11, 12], { warmup: 2, minSamples: 4, beats: 8 }).accepted, false);
+  }
+  eq('latency: ⑤ 降级版没掉：±1ms 微调仍是 1ms 一步', `${CFG.nudgeLatency(0, 1)}/${CFG.nudgeLatency(0, -1)}`, '1/-1');
+  eq('latency: ④ 微调钳位与小游戏夹紧同一区间（不出现两套上限）', `${CFG.nudgeLatency(200, 1)}/${CFG.nudgeLatency(-200, -1)}`, '200/-200');
+  eq('latency: ④ clampLatency 兜住非数值输入', `${CFG.clampLatency(9999)}/${CFG.clampLatency(-9999)}/${CFG.clampLatency(Number.NaN)}`, '200/-200/0');
+  eq('latency: ④ 存档 schema 自己也会夹一次（口径与 config 一致）', SAVE.mergeSave({ audio: { latencyOffset: 9e3 } }).audio.latencyOffset, 200);
+
+  /* ---------------- 会话层：节拍计划全部出自 clock.timeAtBeat（T4） ---------------- */
+  {
+    const clock = new MockClock({ t: 0 });
+    const dispatched = [];
+    const session = createCalibrationSession({ clock, click: (item, atSec, leadSec) => dispatched.push({ beat: item.beat, atSec, leadSec, kind: item.kind }) });
+    const info = session.start(1);
+    const plan = session.plan();
+    eq('latency: 起钟给回 8 拍 + 起点', `${info.beats}/${info.startSec}`, '8/1');
+    eq('latency: 每拍的「理论时刻」= clock.timeAtBeat(k)（没有 60/bpm、没有 setTimeout）', plan.map((t) => t.toFixed(6)).join(','), Array.from({ length: 8 }, (_, k) => clock.timeAtBeat(k).toFixed(6)).join(','));
+    ok('latency: 理论时刻严格递增（拍与拍之间是分段积分，不是等速除法）', plan.every((t, i) => i === 0 || t > plan[i - 1]), plan.join(' '));
+    near('latency: 收口时刻 = timeAtBeat(最后一拍 + tailBeats)', info.endSec, clock.timeAtBeat(7 + G.tailBeats), 1e-9, 's');
+    ok('latency: 起钟后时钟在跑（会话期间由它做唯一时间权威）', clock.isRunning(), true);
+
+    const OFF = [-30, -25, 12, 10, 11, 9, 13, 250];
+    const samples = [];
+    for (let k = 0; k < 8; k += 1) {
+      clock.advanceTo(plan[k] + 0.001); // 先过派发窗（提前量非负 → 这一拍真的出声）
+      samples.push(session.tap(plan[k] + OFF[k] / 1000));
+    }
+    eq('latency: ② 每拍出声的时刻 = 该拍理论时刻（注册进 schedule 的就是它）', dispatched.map((d) => d.atSec.toFixed(6)).join(','), plan.map((t) => t.toFixed(6)).join(','));
+    eq('latency: ①② 八下敲完自动收口（样本数 = 8）', session.samples().length, 8);
+    ok('latency: deltaMs = 输入时刻 − 该拍理论时刻（毫秒，正=打得晚）', samples.every((s, i) => s && Math.abs(s.deltaMs - OFF[i]) < 1e-6), samples.map((s) => s && s.deltaMs).join(' '));
+    eq('latency: 每个样本都归到了自己那一拍', samples.map((s) => s.beat).join(','), '0,1,2,3,4,5,6,7');
+    const sum = session.summary();
+    eq('latency: ① 会话结算写入值 = 中位数 11.5ms（不是均值 50.8ms）', `${sum.appliedMs}/${sum.used}/${sum.dropped}`, '11.5/6/2');
+    eq('latency: 收口后停表（BeatClock 轮询清掉，PERF-08 不留残留 interval）', `${clock.isRunning()}/${clock.queueSize()}`, 'false/0');
+  }
+  {
+    // 迟到的那一拍不补发（CR-11 的「宁缺不糊」）→ 没听见的拍不许计样本
+    const clock = new MockClock({ t: 0 });
+    const sounded = [];
+    const session = createCalibrationSession({ clock, click: (item) => sounded.push(item.beat) });
+    const plan = (session.start(1), session.plan());
+    for (let k = 0; k < 8; k += 1) {
+      if (k === 4) {
+        clock.advanceTo(plan[4] + 0.02); // 一步跨过派发窗 → 这一拍迟到、不出声
+        ok('latency: 没听见的拍不计样本（不拿「静音」当「打晚了」）', session.tap(plan[4] + 0.02) === null && session.stats.ignoredUnheard === 1, `unheard=${session.stats.ignoredUnheard}`);
+        continue;
+      }
+      clock.advanceTo(plan[k] + 0.001);
+      session.tap(plan[k] + 0.002);
+    }
+    clock.advanceTo(clock.timeAtBeat(7 + G.tailBeats) + 0.01);
+    eq('latency: ② 卡顿时迟到的拍不补发（出声拍里少第 4 拍）', sounded.join(','), '0,1,2,3,5,6,7');
+    eq('latency: 迟到的拍被记进 lateSkipped', session.stats.lateSkipped, 1);
+    eq('latency: 有效敲击 = 7 下（丢 2 热身 → 5 个样本，仍达 minSamples）', `${session.samples().length}/${session.summary().used}`, '7/5');
+  }
+  {
+    // 重复敲 / 敲在范围外都不记账；中途取消不留残留
+    const clock = new MockClock({ t: 0 });
+    const session = createCalibrationSession({ clock, click: () => true });
+    const plan = (session.start(1), session.plan());
+    clock.advanceTo(plan[2] + 0.001);
+    ok('latency: 敲在计划之前（第 0 拍以前）不计账', session.tap(plan[0] - 0.4) === null && session.stats.ignoredOutOfRange === 1, `out=${session.stats.ignoredOutOfRange}`);
+    ok('latency: 第 2 拍第一次敲进账', session.tap(plan[2] + 0.01) !== null, true);
+    ok('latency: 同拍第二次敲不重复计账（JDG-08 同口径）', session.tap(plan[2] + 0.02) === null && session.stats.ignoredDuplicate === 1, `dup=${session.stats.ignoredDuplicate}`);
+    ok('latency: 敲到计划外（第 8 拍之后）不计账', session.tap(plan[7] + 0.5) === null && session.stats.ignoredOutOfRange === 2, `out=${session.stats.ignoredOutOfRange}`);
+    session.stop();
+    eq('latency: 中途取消 → 停表 + 不产结算', `${clock.isRunning()}/${clock.queueSize()}/${session.summary()}`, 'false/0/null');
+  }
+
+  /* ---------------- ⑤ 符号口径：写进 latency 后判定真的被补偿（C2） ---------------- */
+  function judgeWith(latencyMs) {
+    const clock = new MockClock();
+    clock.init({ bpm: 100, introBeats: 0, sections: [{ beat: 0, state: 'PEAK', layers: ['kick'] }] });
+    clock.start(0);
+    const system = JS.createJudgeSystem({ clock });
+    system.setLatency(latencyMs);
+    system.registerObstacles([obstacle({ id: 'CAL', beat: 20, timeSec: 12, type: 'spike', track: 'kick' })]);
+    return { clock, system };
+  }
+  {
+    const act = JS.expectedAction('spike');
+    const zero = judgeWith(0);
+    const late = zero.system.onInput(act, 12.08); // 系统性晚 80ms
+    near('latency: 校准前：晚打 80ms 的 deltaMs = +80（与小游戏里同符号）', late.deltaMs, 80, 1e-6, 'ms');
+    eq('latency: 校准前：这一下不是 PERFECT', late.grade, 'GOOD');
+    const fixed = judgeWith(80);
+    const same = fixed.system.onInput(act, 12.08);
+    near('latency: 把中位数 80ms 写进 latencyOffset 后，同样那一下 deltaMs 回到 0', same.deltaMs, 0, 1e-6, 'ms');
+    eq('latency: 于是判定升到 PERFECT（校准的目的就是这件事）', same.grade, 'PERFECT');
+    const backw = judgeWith(-80);
+    near('latency: 符号写反会把偏差放大成 +160ms（口径不能反着来）', backw.system.onInput(act, 12.08).deltaMs, 160, 1e-6, 'ms');
+    eq('latency: getLatency 回读写入值', fixed.system.getLatency(), 80);
+  }
+
+  /* ---------------- ⑦ JDG-09 验收：校准必须真的把系统偏差吃掉 ---------------- */
+  /**
+   * PRD:185 的验收口径原文是「校准 0ms 与人为 +60ms 两次结果，Perfect 率差 < 3%」。
+   * 这句话只有按「补偿生效」读才成立：一个系统性晚 60ms 的人，走完校准小游戏之后，
+   * 在关卡里的 Perfect 率应当和不带偏差的基准玩家持平（差 < 3 个百分点）。
+   * 反着读（同一批输入，offset=0 与 offset=60 的 Perfect 率差 < 3%）等于断言
+   * latencyOffset 没有作用，会把 ⑤ 的符号口径判成矛盾，所以那种读法不编码。
+   * 因此这里三条一起钉：校准后 ≈ 基准（<3pp）、没校准 ≡ 基准（差 >3pp，防假绿）、
+   * 补偿量取自校准函数本身而不是手写常量。
+   */
+  {
+    const BIAS = 60; // 人为注入的系统性偏晚（PRD 验收值）
+    const JIT = [12, -8, 5, -15, 3, 9, -6, 2]; // 固定抖动，样本可复现
+    const jitAt = (i) => JIT[i % JIT.length];
+
+    const calSamples = Array.from({ length: G.beats }, (_, i) => ({ deltaMs: BIAS + jitAt(i) }));
+    const cal = summarize(calSamples, { warmup: G.warmupBeats, minSamples: G.minSamples, beats: G.beats });
+    ok('latency: ⑦ 验收前置：这批样本本身要能通过校准（否则没有「校准后」可比）', cal.accepted === true, cal.reason);
+
+    const ACT = JS.expectedAction('spike');
+    function runLevel({ latencyMs, bias }) {
+      const clock = new MockClock();
+      clock.init({ bpm: 100, introBeats: 0, sections: [{ beat: 0, state: 'PEAK', layers: ['kick'] }] });
+      clock.start(0);
+      const system = JS.createJudgeSystem({ clock });
+      system.setLatency(latencyMs);
+      const N = 40;
+      system.registerObstacles(
+        Array.from({ length: N }, (_, i) => obstacle({ id: `JD9-${i}`, beat: 4 + i, timeSec: clock.timeAtBeat(4 + i), type: 'spike', track: 'kick', core: true }))
+      );
+      let perfect = 0;
+      for (let i = 0; i < N; i += 1) {
+        const t = clock.timeAtBeat(4 + i) + (bias + jitAt(i)) / 1000;
+        const r = system.onInput(ACT, t);
+        if (r && r.grade === 'PERFECT') perfect += 1;
+      }
+      return { rate: perfect / N, perfect, total: N };
+    }
+
+    const base = runLevel({ latencyMs: 0, bias: 0 }); // 基准玩家：不偏晚、也没校准
+    const after = runLevel({ latencyMs: cal.appliedMs, bias: BIAS }); // 同一批偏晚输入，校准后
+    const before = runLevel({ latencyMs: 0, bias: BIAS }); // 同一批偏晚输入，没校准
+
+    const diff = Math.abs(after.rate - base.rate) * 100;
+    ok(
+      `latency: ⑦ JDG-09 验收：+60ms 玩家校准后 Perfect 率与基准差 < 3pp（PRD:185）`,
+      diff < 3,
+      `基准 ${(base.rate * 100).toFixed(1)}% vs 校准后 ${(after.rate * 100).toFixed(1)}% → 差 ${diff.toFixed(1)}pp（补偿量 ${cal.appliedMs}ms）`
+    );
+    ok(
+      'latency: ⑦ 同批输入不校准时差距必须远大于 3pp（否则上一条是因为 offset 无效而假绿）',
+      Math.abs(before.rate - base.rate) * 100 > 3,
+      `未校准 ${(before.rate * 100).toFixed(1)}%（${before.perfect}/${before.total}）vs 基准 ${(base.rate * 100).toFixed(1)}%`
+    );
+    ok('latency: ⑦ 未校准的偏晚玩家确实掉出了 PERFECT 但没被打成 MISS（窗口口径没走形）', before.perfect < base.perfect && before.perfect > 0, `${before.perfect}/${before.total}`);
+    ok('latency: ⑦ 补偿量 ≈ 注入的系统偏差（校准读数没有偏到别的量上）', Math.abs(cal.appliedMs - (BIAS + median(JIT))) < 1e-9, `applied=${cal.appliedMs} 期望=${BIAS + median(JIT)}`);
+  }
+
+  /* ---------------- 可用性：什么情况不许放拍（放了就是假校准） ---------------- */
+  {
+    const noEngine = calibrationAvailability(null, null);
+    eq('latency: 引擎没接线 → 不可用（no-engine）', `${noEngine.ok}/${noEngine.code}`, 'false/no-engine');
+    const locked = calibrationAvailability({ getStatus: () => ({ ready: false, ctxState: 'suspended' }) }, null);
+    eq('latency: 音频没解锁 → 不可用（locked，提示走 main.js 的单点解锁）', `${locked.ok}/${locked.code}`, 'false/locked');
+    const paused = calibrationAvailability({ getStatus: () => ({ ready: true, ctxState: 'running' }) }, { paused: true });
+    eq('latency: 关卡停在暂停态（clock.pause 冻住音频钟，R11）→ 不可用（paused）', `${paused.ok}/${paused.code}`, 'false/paused');
+    const susp = calibrationAvailability({ getStatus: () => ({ ready: true, ctxState: 'suspended' }) }, null);
+    eq('latency: ctx 不是 running → 不可用（suspended）', `${susp.ok}/${susp.code}`, 'false/suspended');
+    const why = calibrationAvailability({ getStatus: () => ({ ready: true, ctxState: 'running' }) }, null);
+    eq('latency: 引擎在跑 → 可用', `${why.ok}/${why.code}`, 'true/ok');
+    // K-20：click 子总线接在 music → master 之后（TrackMixer 构造里每条 bus 都 connect 到 this.music），
+    // 所以主音量/音乐滑条归零时节拍器「放得出来但听不见」——不拦住就会把八拍盲敲的中位数写成 latency。
+    const muteMaster = calibrationAvailability({ getStatus: () => ({ ready: true, ctxState: 'running', volumes: { master: 0, music: 0.6, sfx: 0.7 } }) }, null);
+    eq('latency: 主音量为 0 → 不可用（silent，K-20 盲敲防线）', `${muteMaster.ok}/${muteMaster.code}`, 'false/silent');
+    const muteMusic = calibrationAvailability({ getStatus: () => ({ ready: true, ctxState: 'running', volumes: { master: 0.8, music: 0, sfx: 0.7 } }) }, null);
+    eq('latency: 音乐音量为 0（click 走 music 总线）→ 不可用（silent）', `${muteMusic.ok}/${muteMusic.code}`, 'false/silent');
+    const lowButNotZero = calibrationAvailability({ getStatus: () => ({ ready: true, ctxState: 'running', volumes: { master: 0.02, music: 0.05, sfx: 0 } }) }, null);
+    eq('latency: 只是很小但没有归零 → 仍然可用（不许把「难听清」误判成「听不见」）', `${lowButNotZero.ok}/${lowButNotZero.code}`, 'true/ok');
+    const noVol = calibrationAvailability({ getStatus: () => ({ ready: true, ctxState: 'running' }) }, null);
+    eq('latency: getStatus 没带 volumes（旧桩）→ 不因 K-20 误拦', noVol.ok, true);
+    ok('latency: 每条不可用都带原因文案（不许只给一个灰按钮）', [noEngine, locked, paused, susp, muteMaster, muteMusic].every((r) => r.reason.length > 8), '');
+  }
+
+  /* ---------------- 面板 + UiLayer 端到端（假 DOM + 注入 MockClock 会话） ---------------- */
+  const dom = installFakeDom();
+  const saveStub = makeStubStorage();
+  const log = { sfx: [], clicks: [], bus: [] };
+  const calClock = new MockClock({ t: 0 });
+  let busOn = true; // 与 SoundEngine 出厂一致：_beatClick 默认 true
+  const engine = {
+    getStatus: () => ({ ready: true, ctxState: 'running', paused: false }),
+    ctx: { get currentTime() { return calClock.time(); } },
+    playSfx: (name) => { log.sfx.push(name); return true; },
+    playClick: (item, atSec, _leadSec) => { log.clicks.push(`${item.beat}@${atSec.toFixed(4)}`); return true; },
+    beatClick: (on) => { busOn = !!on; log.bus.push(busOn); return busOn; },
+    beatClickOn: () => busOn,
+    setVolumes: () => true,
+    getVolumes: () => ({ master: 0.8, music: 0.6, sfx: 0.7 }),
+    ensureRunning: () => Promise.resolve(true)
+  };
+  const spy = { latency: [], strict: [] };
+  const judgeCore = judgeWith(0).system;
+  const judge = {
+    setLatency: (ms) => { spy.latency.push(ms); return judgeCore.setLatency(ms); },
+    getLatency: () => judgeCore.getLatency(),
+    setStrictWindow: (on) => { spy.strict.push(!!on); return judgeCore.setStrictWindow(on); },
+    windows: () => judgeCore.windows()
+  };
+  const dsStub = { stats: () => ({ state: 'PEAK', perfect: 0, total: 0, perfectRate: 0, combo: 0, maxCombo: 0, miss: 0, hp: {} }), hpMax: () => 3, state: () => 'PEAK' };
+  SAVE.__resetSaveState();
+  SAVE.loadSave(saveStub);
+  const route = [];
+  const ui = UI.createUiLayer({
+    clock: calClock,
+    judge,
+    ds: dsStub,
+    engine,
+    levels: () => [],
+    gotoLevel: (id) => route.push(`goto:${id}`),
+    toTitle: (d) => route.push(`title:${(d && d.notice) || ''}`),
+    runtime: () => null,
+    cal: { clock: calClock } // 测试注入：会话用手动时钟驱动；生产缺省 = 本文件 new 的独立 BeatClock（不碰关卡单例）
+  });
+
+  /** 面板里读文本 / 点按钮。 */
+  const txt = () => textOf(ui.element());
+  const role = (r) => findByRole(ui.element(), r);
+  /** 跟着节拍把 8 下敲完（keydown 当场取 clock.now()，与浏览器同一条路）。 */
+  function playSession(panel, offsets) {
+    const plan = panel.session().plan();
+    for (let k = 0; k < plan.length; k += 1) {
+      calClock.advanceTo(plan[k] + 0.001); // 先过派发窗：这一拍真的出声
+      calClock.advanceTo(plan[k] + Math.max(0.001, offsets[k] / 1000)); // 再敲（偏差由时间源决定，面板不读真实时间）
+      dom.fire('keydown', { code: 'Space' });
+    }
+    return panel.state().summary;
+  }
+
+  try {
+    /* 入口：设置面板 */
+    await ui.showSettings('title');
+    ok('latency: ⑥ 设置面板有校准入口（文案看得懂）', Boolean(role('open-calibration')) && txt().some((t) => t.includes('校准小游戏') && t.includes('中位数')), '');
+    const sfxBefore = log.sfx.length;
+    role('open-calibration').click();
+    eq('latency: ⑥ 点校准入口 = ui 音效直发一次', log.sfx.slice(sfxBefore).join(','), 'ui');
+    eq('latency: 校准面板挂上（同屏仍只有一层）', `${ui.current()}/${dom.uiRoot.childNodes.length}`, 'calibration/1');
+    const panel = ui.calibration();
+    ok('latency: 面板显示当前生效值（0ms）', txt().some((t) => t === '0ms'), txt().join('|').slice(0, 160));
+    ok('latency: 降级版一条不许掉：面板里也有 ±1ms 两个按钮', Boolean(role('latency-up')) && Boolean(role('latency-down')));
+
+    /* 打满 8 下（含一个 +250ms 的故意离群）→ 中位数写进存档 */
+    role('cal-start').click();
+    ok('latency: 起会话时抬起 click 子总线（寂静段外的节拍器要能出声）', log.bus[log.bus.length - 1] === true, log.bus.join(','));
+    eq('latency: 点开始 = 走 ui 音效', log.sfx[log.sfx.length - 1], 'ui');
+    eq('latency: 会话用的就是注入的那只手时钟（不是关卡单例）', panel.session().clock, calClock);
+    const sum = playSession(panel, [-30, -25, 12, 10, 11, 9, 13, 250]);
+    eq('latency: ① 面板上的中位数 = 11.5ms / 样本 6-8', `${sum.appliedMs}/${sum.used}/${sum.taps}`, '11.5/6/8');
+    eq('latency: 节拍器真的按每拍理论时刻出声（8 拍）', log.clicks.length, 8);
+    ok('latency: 面板把「中位数 / 样本数 / 当前值」都摆出来', txt().some((t) => t.includes('11.5ms')) && txt().some((t) => t.includes('6/8')), txt().join('|').slice(0, 200));
+    ok('latency: 会话结束把 click 子总线还给原状态（不越权改 SOUND）', log.bus[log.bus.length - 1] === true && !calClock.isRunning(), log.bus.join(','));
+    role('cal-apply').click();
+    eq('latency: ⑤ 写入只经 judge.setLatency 一次，值 = 中位数', `${spy.latency.length}/${judge.getLatency()}`, '1/11.5');
+    eq('latency: ⑤ 存档里 latencyOffset 立刻读得回来', SAVE.getSave().audio.latencyOffset, 11.5);
+    eq('latency: ⑤ 面板上的「当前值」跟着变', txt().filter((t) => t === '11.5ms').length >= 2, true);
+    SAVE.flushSave(saveStub);
+    eq('latency: ⑤ 落盘用的是同一个键（没有第二个存储键）', SAVE.SAVE_KEY, 'rhythm-breaker/save');
+    eq('latency: ⑤ 落盘后从桩里读回来', JSON.parse(saveStub.map.get(SAVE.SAVE_KEY)).audio.latencyOffset, 11.5);
+    ok('latency: ⑤ 校准完成 = SAV-02 的写入时机（写盘次数确实涨了）', saveStub.writes >= 1, `writes=${saveStub.writes}`);
+    eq('latency: ⑤ 写入后判定链立即生效（不用重开关）', judgeCore.getLatency(), 11.5);
+
+    /* 越界夹紧：全部晚 250ms → 中位数 250 → 夹到 200 */
+    role('cal-start').click();
+    const sum2 = playSession(panel, [250, 250, 250, 250, 250, 250, 250, 250]);
+    eq('latency: ④ 中位数 250ms 越界 → 待写值夹到 200ms', `${sum2.medianMs}/${sum2.clamped}/${sum2.appliedMs}`, '250/true/200');
+    role('cal-apply').click();
+    eq('latency: ④ 夹紧后的值才进存档', `${judge.getLatency()}/${SAVE.getSave().audio.latencyOffset}`, '200/200');
+
+    /* 样本不足：只敲 4 下 → 拒绝写入 + 提示 */
+    const before = judge.getLatency();
+    role('cal-start').click();
+    const plan3 = panel.session().plan();
+    for (let k = 0; k < 4; k += 1) {
+      calClock.advanceTo(plan3[k] + 0.001);
+      dom.fire('keydown', { code: 'Space' });
+    }
+    calClock.advanceTo(calClock.timeAtBeat(plan3.length - 1 + G.tailBeats) + 0.01); // 收到口：只采到 4 下
+    const sum3 = panel.state().summary;
+    eq('latency: ③ 只敲 4 下 → 热身后 2 个样本 → accepted:false', `${sum3.used}/${sum3.accepted}`, '2/false');
+    const latBefore = judge.getLatency();
+    role('cal-apply').click();
+    eq('latency: ③ 样本不足时不写入（judge 与存档都不动）', `${judge.getLatency()}/${SAVE.getSave().audio.latencyOffset}`, `${latBefore}/${latBefore}`);
+    eq('latency: ③ 会话过程中也没偷偷改过 latency（拒写前的读数与拒写后一致）', `${before}/${latBefore}`, `${latBefore}/${latBefore}`);
+    ok('latency: ③ 拒写时面板上有看得懂的提示', txt().some((t) => t.includes('样本不足')), txt().join('|').slice(-200));
+    eq('latency: ③ 拒写也不许多调一次 setLatency（前面两次有效写入）', spy.latency.length, 2);
+
+    /* 清零（JDG-09 的「重置为 0」）与 ±1ms（降级版） */
+    role('cal-reset').click();
+    eq('latency: ⑤「重置为 0」写进判定与存档', `${judge.getLatency()}/${SAVE.getSave().audio.latencyOffset}`, '0/0');
+    role('latency-up').click();
+    role('latency-up').click();
+    role('latency-down').click();
+    eq('latency: ⑤ 降级版 ±1ms 在面板里照样能用（净 +1ms）', judge.getLatency(), 1);
+    ok('latency: ⑥ 面板按钮同样直发 ui 音效', log.sfx.slice(-3).every((n) => n === 'ui'), log.sfx.slice(-3).join(','));
+
+    /* 取消返回 + 键盘监听不留残留 */
+    role('cal-back').click();
+    await flushMicrotasks();
+    eq('latency: 取消 → 回设置面板（不写任何值）', `${ui.current()}/${judge.getLatency()}`, 'settings/1');
+    eq('latency: 面板关掉后时钟停、队列空', `${calClock.isRunning()}/${calClock.queueSize()}`, 'false/0');
+    eq('latency: 面板关掉后 window keydown 退订（不留监听）', dom.listenerCount('keydown'), 0);
+    dom.fire('keydown', { code: 'Space' });
+    eq('latency: 退订后空格不再产生样本', ui.calibration(), null);
+
+    /* 从暂停面板进校准：时钟被 clock.pause 冻住 → 小游戏不可用，但微调还能用（UI-05） */
+    const rt = { paused: true, cfg: { id: 1, title: 'x' }, togglePause: () => {}, restart: () => {}, quit: () => {}, stateLine: () => '' };
+    ui.close();
+    const ui2 = UI.createUiLayer({
+      clock: calClock, judge, ds: dsStub, engine, levels: () => [],
+      gotoLevel: (id) => route.push(`goto:${id}`), toTitle: () => {}, runtime: () => rt, cal: { clock: calClock }
+    });
+    await ui2.showPause();
+    ok('latency: ⑥ 暂停面板有校准入口（UI-05）', Boolean(findByRole(ui2.element(), 'pause-calibrate')));
+    findByRole(ui2.element(), 'pause-calibrate').click();
+    eq('latency: 暂停态里也能打开校准面板（走降级通路）', ui2.current(), 'calibration');
+    const p2 = ui2.calibration();
+    ok('latency: 暂停态里如实说明小游戏为什么不能打（不是只给个灰按钮）', textOf(ui2.element()).some((t) => t.includes('暂停') && t.includes('微调')), textOf(ui2.element()).join('|').slice(0, 200));
+    const lat2 = judge.getLatency();
+    findByRole(ui2.element(), 'cal-start').click();
+    eq('latency: 不可用时点「开始」不起会话、不写脏值', `${p2.session()}/${judge.getLatency()}`, `null/${lat2}`);
+    findByRole(ui2.element(), 'latency-up').click();
+    eq('latency: 不可用时 ±1ms 仍然可用（降级版一条不许掉）', judge.getLatency(), lat2 + 1);
+    ui2.destroy();
+    eq('latency: ui2 destroy 后不留 keydown', dom.listenerCount('keydown'), 0);
+
+    /* K-21：可用性必须是「现读现算」——面板开着时把主音量拉到 0，下一拍就不许再放 */
+    {
+      const vols = { master: 0, music: 0.6, sfx: 0.7 };
+      const muteEngine = {
+        getStatus: () => ({ ready: true, ctxState: 'running', paused: false, volumes: { ...vols } }),
+        ctx: { get currentTime() { return calClock.time(); } },
+        playSfx: () => true,
+        beatClick: () => true,
+        beatClickOn: () => true,
+        setVolumes: (v) => {
+          for (const k of ['master', 'music', 'sfx']) if (Number.isFinite(v[k])) vols[k] = v[k];
+          return { ...vols };
+        },
+        getVolumes: () => ({ ...vols }),
+        ensureRunning: () => Promise.resolve(true)
+      };
+      const uiM = UI.createUiLayer({
+        clock: calClock, judge, ds: dsStub, engine: muteEngine, levels: () => [],
+        gotoLevel: () => {}, toTitle: () => {}, runtime: () => null, cal: { clock: calClock }
+      });
+      uiM.showCalibration({});
+      const pM = uiM.calibration();
+      eq('latency: K-21 建面板时静音 → 打开即不可用（silent）', `${pM.state().availability.code}/${pM.start()}`, 'silent/false');
+      eq('latency: K-21 静音里点「开始」不会留下半个会话', pM.session(), null);
+      muteEngine.setVolumes({ master: 0.8 }); // 玩家在同一张面板前把音量拉回来
+      pM.render();
+      eq('latency: K-21 不重建面板、只重读就把可用性改回 ok（快照会被冻住的地方）', `${pM.state().availability.code}/${pM.start()}`, 'ok/true');
+      const started = pM.session();
+      pM.stop();
+      uiM.destroy();
+      eq('latency: K-21 恢复后真的起得了会话（不是只改了文案）', Boolean(started), true);
+      eq('latency: K-21 UiLayer 传的是函数而不是快照', /availability:\s*\(\)\s*=>/.test(readFileSync(join(ROOT, 'src/ui/screens/UiLayer.js'), 'utf8')), true);
+    }
+  } finally {
+    ui.close();
+    ui.destroy();
+    dom.fire('keydown', { code: 'Escape' }); // 兜底：证明摘干净之后再敲键盘不会抛
+    SAVE.__resetSaveState();
+    dom.restore();
+  }
+
+  /* ---------------- ⑥ ui 音效：五界面逐层实按 + Sfx 登记表 ---------------- */
+  {
+    const dom2 = installFakeDom();
+    // 界面里的 showTitle/showSelect 会读存档：把桩绑到 save.js 的 boundStorage 上（__resetSaveState 之后
+    // loadSave(undefined) 只认 boundStorage），免得给后面的 case 留下「localStorage 不可用」的降级状态
+    SAVE.loadSave(makeStubStorage());
+    const heard = [];
+    const eng = {
+      getStatus: () => ({ ready: true, ctxState: 'running' }),
+      playSfx: (name) => { heard.push(name); return true; },
+      setVolumes: () => true,
+      getVolumes: () => ({ master: 0.8, music: 0.6, sfx: 0.7 }),
+      ensureRunning: () => Promise.resolve(true),
+      beatClick: () => true,
+      beatClickOn: () => true,
+      playClick: () => true
+    };
+    const jd = judgeWith(0);
+    const uix = UI.createUiLayer({
+      clock: jd.clock, judge: jd.system, ds: dsStub, engine: eng, levels: () => [{ id: 1, title: 'A', bpm: 100, cleared: false }, { id: 2, title: 'B', bpm: 120, cleared: true }],
+      gotoLevel: (id) => heard.push(`goto:${id}`), toTitle: () => heard.push('title'), runtime: () => null
+    });
+    try {
+      const steps = [
+        ['① 标题', () => uix.showTitle({}), 'title-settings'],
+        ['② 选关', () => uix.showSelect(), 'pick-2'],
+        ['② 选关返回', () => uix.showSelect(), 'select-back'],
+        ['③ 暂停', () => uix.showPause(), 'pause-resume'],
+        ['④ 设置', () => uix.showSettings('title'), 'settings-back'],
+        ['⑤ 结算', () => uix.showResult({ total: 2, perfect: 1, baseTotal: 2, perfectRate: 0.5, rank: 'B', encounterRate: 0.5, disassembled: false, hp: {} }, { level: { id: 1, title: 'A' } }), 'result-title']
+      ];
+      for (const [label, show, btn] of steps) {
+        await show();
+        const before = heard.length;
+        const hit = findByRole(uix.element(), btn);
+        ok(`latency: ⑥ ${label} 的按钮找到（${btn}）`, Boolean(hit));
+        if (hit) hit.click();
+        await flushMicrotasks();
+        eq(`latency: ⑥ ${label} 点击直发且只发一次 ui 音效`, heard.slice(before).filter((x) => x === 'ui').join(','), 'ui');
+        heard.length = before;
+      }
+      await uix.showTitle({});
+      const before2 = heard.length;
+      findByRole(uix.element(), 'title-start').click();
+      await flushMicrotasks();
+      ok('latency: ⑥ 标题「开始」也发声（且不影响 CR-11 的解锁顺序）', heard.slice(before2).includes('ui'), heard.slice(before2).join(','));
+    } finally {
+      uix.destroy();
+      delete globalThis.localStorage;
+      SAVE.__resetSaveState();
+      dom2.restore();
+    }
+
+    eq('latency: ⑥ `ui` 在 Sfx 候选表里登记', SF.SFX_NAMES.includes('ui'), true);
+    ok('latency: ⑥ `ui` 的触发来源写明「调用点直发：UI 按钮与关卡选择」', /调用点直发/.test(String(SF.SFX_TRIGGERS.ui)) && /UI|界面/.test(String(SF.SFX_TRIGGERS.ui)), String(SF.SFX_TRIGGERS.ui));
+    eq('latency: ⑥ Sfx 自检表仍然干净（加接线没把候选/路由表拆坏）', SF.sfxAudit().errors.length, 0);
+
+    /* 静态：五个界面都留了调用点；界面里不许第二个 AudioContext / 第二个解锁监听（CR-11） */
+    // 注释里写「本文件不许出现 X」是给人看的，不该被自己的扫描打中 → 扫之前剥掉注释
+    const stripComments = (text) => String(text).replace(/\/\*[\s\S]*?\*\//g, ' ').split('\n').map((l) => {
+      const i = l.indexOf('//');
+      return i >= 0 ? l.slice(0, i) : l;
+    }).join('\n');
+    const uiFiles = existsSync(join(SRC, 'ui')) ? walk(join(SRC, 'ui')) : [];
+    const srcOf = {};
+    const codeOf = {};
+    for (const abs of uiFiles) {
+      const rel = relative(ROOT, abs).split(sep).join('/');
+      srcOf[rel] = readFileSync(abs, 'utf8');
+      codeOf[rel] = stripComments(srcOf[rel]);
+    }
+    for (const rel of ['src/ui/screens/titleScreen.js', 'src/ui/screens/levelSelect.js', 'src/ui/screens/pauseScreen.js', 'src/ui/screens/settingsScreen.js', 'src/ui/screens/resultScreen.js']) {
+      ok(`latency: ⑥ ${rel} 里有 uiSound 调用点`, (codeOf[rel] || '').includes('deps.uiSound'), '');
+    }
+    ok('latency: ⑥ UiLayer 是唯一把 ui 接到 engine.playSfx 的地方', (codeOf['src/ui/screens/UiLayer.js'] || '').includes("playSfx('ui')"), '');
+    const badCtx = Object.entries(codeOf).filter(([, text]) => /new\s+AudioContext|webkitAudioContext/.test(text)).map(([p]) => p);
+    eq('latency: CR-11 界面名下 0 个 AudioContext（解锁单点在 main.js）', badCtx.join(','), '');
+    const badUnlock = Object.entries(codeOf).filter(([, text]) => /addEventListener\(\s*['"](pointerdown|mousedown|touchstart)['"]/.test(text)).map(([p]) => p);
+    eq('latency: CR-11 界面名下 0 个手势解锁监听', badUnlock.join(','), '');
+    const badStorage = Object.entries(codeOf).filter(([, text]) => /\blocalStorage\b/.test(text)).map(([p]) => p);
+    eq('latency: ⑤ 界面不自己碰 localStorage（持久化只走 save.js）', badStorage.join(','), '');
+    const cal = codeOf['src/ui/Calibration.js'] || '';
+    ok('latency: ⑤ 校准面板自己不写存档（唯一通路 = opt.apply → updateSave）', !cal.includes('updateSave') && !cal.includes('localStorage'), '');
+    ok('latency: T4 校准面板只经 BeatClock 拿时刻', cal.includes('createBeatClock(') && cal.includes('timeAtBeat('), '');
+    const bannedInCal = ['performance.now', 'Date.now', 'new Date(', 'scene.time', 'this.time.now', 'setTimeout', 'setInterval', 'requestAnimationFrame', '60 /', '60/', 'beatLength'].filter((p) => cal.includes(p));
+    eq('latency: T4 校准面板里 0 处真实时间 / 自算拍长', bannedInCal.join(','), '');
+  }
+  note('latency：① 中位数（含故意离群样本）② 丢 2 次热身 ③ 样本不足拒写 ④ ±200 夹紧 ⑤ updateSave 单键 + 即时生效 ⑥ 五界面 ui 音效 + Sfx 登记表，全部在 Node 里用同一套 BeatClock 语义跑通（不读真实时间）。');
 }
 
 /* ------------------------------------------------------------------ */
@@ -2603,19 +3363,18 @@ async function caseDef04() {
   } else {
     const rig = defRig(MC, JS, DS, cfg2, (c) => PG.build(cfg2, c));
     const chartIds = new Set(rig.instances.filter((o) => o.judgable !== false).map((o) => o.id));
-    let kickedCore = 0;
-    defPlay(rig, (o) => {
-      if (o.track === 'kick' && o.core === true && kickedCore < 4) {
-        kickedCore += 1;
-        return true;
-      }
-      return false;
-    });
+    // R13c 策略改写（B-1 复活规则修好之后必须换场景，否则 ③ 的前置自己就不成立）：
+    //   旧口径「只打 4 个核心鼓点、其余全放过」——kick 一旦是唯一受损声部，每次 bass MISS
+    //   都按 §7.2:342 的回落口径把它补回一格，kick 永远到不了 0，也就没有「带 id 的复活」可断言。
+    //   新口径「beat ≤ 48 全打中、之后全放过」：48 正好是 kick 的第 4 个核心节点，拆鼓落在
+    //   还剩 21 个未来 kick 事件的位置上；此后 bass MISS 把 kick 从 0 抬回 1，
+    //   DEF-04 的「复活下发原件 id（不铸 -rvN）」这条路才真的被踩到。
+    defPlay(rig, (o) => o.beat <= 48);
     const st = rig.ds.stats();
     const penalized = rig.feed.filter((j) => j.penalizes !== false && j.rule !== 'emptyBeat');
     const ids = penalized.map((j) => j.obstacleId);
     eq('def04③: L2 初始谱面可判定障碍 = 56（与既有固化数字一致）', st.baseTotal, 56);
-    eq('def04③: 前置——只打了 4 个核心鼓点（kick 拆空）', kickedCore, 4);
+    eq('def04③: 前置——kick 真的拆空过一次（beat 48 = 第 4 个核心节点 → DIS-04 拆解事件）', rig.ev.filter((e) => e.name === 'disassemble' && e.track === 'kick').length, 1);
     ok('def04③: 前置——L2 这一局真的发生了带 id 的复活', rig.reviveEvents > 0 && rig.reviveIds.length > 0, `revive=${rig.reviveEvents} ids=${rig.reviveIds.length}`);
     eq('def04③: 复活下发 id 全是原件（不铸新身份）', rig.reviveIds.filter((id) => !chartIds.has(id)).length, 0);
     eq('def04③: 分母/核心分母不受复活影响（§7.3）', `${st.total}/${st.baseTotal}/${st.coreTotal}/${st.baseCoreTotal}`, '56/56/14/14');
@@ -2889,7 +3648,8 @@ const CASES = [
   ['actiontype', caseActiontype],
   ['freeorder', caseFreeorder],
   ['integration', caseIntegration],
-  ['screens', caseScreens]
+  ['screens', caseScreens],
+  ['latency', caseLatency]
 ];
 
 function parseArgs(argv) {

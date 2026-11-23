@@ -483,3 +483,29 @@ K-22 = CR-18；K-23 JDG-09 原文是 8 拍取中位数，实现丢 2 个 warmup 
 reviewer 也确认了**确实做对的**：T4 无实时 API 混进判定路径（`clock.now()` + `timeAtBeat` 自造实例）、
 校准中位数不是写了没人读（`judge.setLatency` → `JudgeSystem.js:336 inputSec = t − latency/1000` 真消费）、
 `save.js` 只增 `options.tutorialSkipped` 且老档不炸、5 屏按钮 ui 声都接通。
+
+## R13c/R13d · HUD 落地 + 初版完成（2026-11-23 14:40–15:15）
+
+R13c 的 PRD↔门禁反查报告落地成 6 个修复 + 2 张新卡（UI-04/DIS-09 HUD、TIM-05/PERF-05③ 辅助线/闪烁开关）。派了三个 agent 并行：
+- **Core-revive**：修 B-1（§7.2 状态矩阵「MISS → **其他**损失最大声部 +1」的代码一直写反，旧实现 `hp=1` 赋值 + 不排除 MISS 声部）→ `DisassembleSystem.js:294-360`，候选域收窄到「在场且受损」、踢掉 `opt.track`、`after = min(hpMax, before+1)`；R5「只在真的改变了什么时才发事件」保险原样保留。门禁 `revive-tie` 50→62，含变异法自证（把 `cand = others.length ? others : damaged` 临时改成 `cand = damaged`，门禁立刻红在 ②b 两条上）。
+- **World-a11y**：TIM-05/PERF-05③ 两个开关从「写进档没人读」变成真消费者——`theme.js` 加 `GUIDE_ALPHA_KEYS`/`FLASH_REDUCTION`/`FLASH_NONE`/`a11yOf()`；`Background.js` 辅助线/出生线按 `showTimelineGuides` 开关；`WorldLayer.js` 的 `_applyFlashScale` 按 `reduceFlash` 削减震屏/bloom/MISS 红边/判定线脉冲（但保留碎裂/大字/降饱和，DIS-04 的可见后果不删）；`LevelRuntime.js:187` 每帧 `_syncA11y()` 从存档现算 `view.a11y`，中档切换不重开关卡。leader 接线 `UiLayer.js`：`settingsData` 加两个字段、`applyOption` 写档、boot 时 `setFlashReduced` 同步 CSS。门禁 `screens` 46→56（UI 拨 → 落档 → 渲染层入口拿到的表真的变 → 消费者在 LevelRuntime 里现算）。
+- **World-HUD**：UI-04/DIS-09 落地——`HudLayer.js` (NEW, 282 lines) 左上连击（≥10 金边）+ 右上三声部耐久 ×3（格 + 已拆解标记）+ 顶部 8% 高度带；`Background.js:237-256` 判定线金色描边（combo ≥ `HUD_CFG.goldComboMin`，纯状态驱动无时钟）；`WorldLayer.js` 透传 combo；`LevelRuntime.js` 每帧 `hud.sync(snapshot)` 从 `ds.counts().combo` / `ds.hpByTrack()` / `ds.hpMax()` / `ds.disassembledTracks()` 读数。`theme.js` 加 `HUD_CFG` + `hudLayout(view)` 纯函数（返回像素矩形，Node 可断言）+ `judgeLineRectOf(view)`。leader 接线 `main.js`：`world-selftest/v1` payload 加 `hud` 字段。门禁 `screens` 56→73（8%·H、不遮判定线 clearance>0、两块互不重叠 blockGap>0、三声部耐久行、所有矩形在带内、金边状态驱动无时钟）。
+
+**PRD M 优先级需求项全部实现**：CLK/JDG/PLR/OBS/DIS/MUS/PGN/LVL/TIM/VIS/SAV/DEP/UI 六组共 50+ 条 M 项，门禁 1027/1027 全绿，verifyAll 5/5 PASS，eslint 0 error。
+
+**遗留（ledger 登记，不代改）**：
+- PLR-04（←/→ 微调）S 优先级，`options.unlockedNudge` 是空槽。
+- MUS-06（成品 loop）S 优先级，零素材依赖路线不冲突。
+- TIM-04（假节拍）C 优先级，已实现但 ledger 登记。
+- DIS-10（自由顺序）C 优先级，已实现但 ledger 登记。
+- SAV-04（导出码）C 优先级，itch.io iframe 分区场景。
+- DEP-02/03（itch zip / 发行物料）launch 工作。
+- UI-07（回放）C 优先级。
+- 评级口径：遭遇口径（DEF-05），需求方批复「接受遭遇口径，先出初版」。
+- 音色/难度：人类门禁，未验收。
+- 浏览器兼容：只测了 Vite dev/build + 无头 Edge，Safari/Firefox 未测。
+
+**验收状态**：`contract` **1027/1027 断言 · 18/18 case · 0 skip**；`verify:all` **5/5 PASS, 0 SKIP, 0 FAIL**；`npx eslint src tools` **0 error 0 warning**。
+本轮三次**变异法自证**：CR-24 的浅拷贝、CR-25 的「其他」排除、CR-27 的 HUD 布局，都能把门禁打红再还原。
+
+**推送**：`v0.2.0` 标签，走 `ssh://git@ssh.github.com:443/GLuckXy/Qoder-rhythm-breaker.git HEAD:main`。

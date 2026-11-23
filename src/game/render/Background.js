@@ -8,8 +8,12 @@
 // 纪律 1：视差位移 = f(nowSec)，见 parallaxOffsetFor()。**没有 x += v*dt**，所以掉帧 5 秒后画面仍在正确位置。
 // 纪律 3：只用 DERIVED 的消色差派生色。**视差层禁止携带声部信息**（否则「颜色即信息」被污染）。
 // 不 import Phaser：绘制目标是调用方给的 Graphics → 本文件可在 Node 用 RecordingGraphics 断言。
+//
+// 无障碍（每帧从 `view.a11y` 读，无副作用）：
+//   · TIM-05 关辅助线 → 不画地面拍刻度、不画出生线（4 拍窗右界）。分区线/地面线/判定线是棋盘，留。
+//   · PERF-05③ 降低闪烁 → 判定线的每拍脉冲幅度 ×0（线还在，不再呼吸）。
 
-import { BACKGROUND_CFG, COLORS, DERIVED, alphaOf, beatOffsetX, resolveView, timeToBeatOf } from '../../data/theme.js';
+import { BACKGROUND_CFG, COLORS, DERIVED, HUD_CFG, a11yOf, alphaOf, beatOffsetX, resolveView, timeToBeatOf } from '../../data/theme.js';
 
 const MOD = BACKGROUND_CFG.MODULATION;
 
@@ -108,13 +112,13 @@ export function groundGeometry(view) {
   };
 }
 
-/** 上层判定线几何（x = 0.30W = 下层判定线 x） */
+/** 上层判定线几何（x = 0.30W = 下层判定线 x；纵向跨度读 theme.BACKGROUND_CFG，与 hudLayout 同一口径） */
 export function judgeLineGeometry(view) {
   const v = resolveView(view);
   return {
     x: v.judgeX,
-    y0: v.zones.worldTop + v.zones.worldHeight * 0.08,
-    y1: v.groundY + v.zones.worldHeight * 0.1,
+    y0: v.zones.worldTop + v.zones.worldHeight * BACKGROUND_CFG.judgeLineTopRatio,
+    y1: v.groundY + v.zones.worldHeight * BACKGROUND_CFG.judgeLineBottomRatio,
     color: COLORS.system.int,
     alpha: alphaOf('judgeLine'),
     lineWidth: v.sizes.judgeLineWidth,
@@ -213,6 +217,8 @@ export class Background {
     const calm = Math.max(0, Math.min(1, this.calm));
     g.lineStyle(gr.lineWidth, gr.color, gr.alpha * (1 - calm * MOD.groundCalmRange));
     g.lineBetween(gr.x0, gr.y, gr.x1, gr.y);
+    // TIM-05：地面线本体是「棋盘」（角色就在它上面跑），拍刻度才是辅助线 —— 关掉只摘刻度。
+    if (!a11yOf(view).showTimelineGuides) return this;
     const nowSec = Number(frame.nowSec) || 0;
     const nowBeat = timeToBeatOf(view, nowSec);
     const step = BACKGROUND_CFG.ground.tickEveryBeats;
@@ -231,17 +237,34 @@ export class Background {
   /** 上层判定线（与下层同 x）；pulse = 边缘节拍脉冲强度（W-14 消费，v0 只做线本身） */
   drawJudgeLine(g, view, frame = {}) {
     const j = this.judge || judgeLineGeometry(view);
-    const pulse = Math.max(0, Math.min(1, Number(frame.pulse) || 0));
+    const a = a11yOf(view);
+    // PERF-05③：脉冲的**可变**幅度（每拍一次的整线明暗，110BPM ≈ 1.83Hz）是频闪主体，
+    // reduceFlash 下 ×0 → 亮度钉在 MODULATION.judgePulseBase，线本身照画（VIS-05 的两层同 x）。
+    const pulse = Math.max(0, Math.min(1, Number(frame.pulse) || 0)) * a.flash.edgePulseRange;
+    // ★ DIS-09：连击 ≥10 → 判定线金色描边。**纯表现**：只读 frame.combo（CORE 传下来的显示态），
+    //   判定路径不读它，它也不吃时间 —— 状态驱动 ⇒ 结构上不会逐帧脉冲。
+    //   reduceFlash 只撤「外圈辉光」这一项闪源；金描边本身留（它是连击档位的冗余提示，不是装饰闪光）。
+    const gold = Number(frame.combo) >= HUD_CFG.goldComboMin;
+    if (gold) {
+      if (!a.reduceFlash) {
+        g.lineStyle(j.lineWidth * HUD_CFG.goldGlowScale, HUD_CFG.gold.int, alphaOf('legend'));
+        g.lineBetween(j.x, j.y0, j.x, j.y1);
+      }
+      g.lineStyle(j.lineWidth * HUD_CFG.goldStrokeScale, HUD_CFG.gold.int, alphaOf('coreEdge'));
+      g.lineBetween(j.x, j.y0, j.x, j.y1);
+    }
     g.lineStyle(j.lineWidth, j.color, j.alpha * (MOD.judgePulseBase + MOD.judgePulseRange * pulse));
     g.lineBetween(j.x, j.y0, j.x, j.y1);
     // 判定点：地面线上的一枚小白块（角色脚底正对此处，PLR-01）
     const s = Math.max(3, view.designScale * 6);
     g.fillStyle(COLORS.white.int, alphaOf('judgeDot'));
     g.fillRect(j.anchor.x - s / 2, j.anchor.y - s / 2, s, s);
+    if (!a.showTimelineGuides) return this; // TIM-05：出生线 = 4 拍预告窗右界，属辅助线
     // 世界可读区右界（出生线）：淡竖线 = 「障碍从这里开始出现」= 4 拍预告窗（与下层同列）
     const sx = view.worldWindow ? view.worldWindow.x1 : view.rightSpawnX;
     g.lineStyle(Math.max(1, view.designScale), DERIVED.divider.int, alphaOf('spawnLine', 1 + MOD.spawnPulseRange * pulse));
     g.lineBetween(sx, view.zones.worldTop, sx, view.groundY);
+    return this;
   }
 
   shutdown(g = null) {
