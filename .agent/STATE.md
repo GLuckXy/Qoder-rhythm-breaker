@@ -413,3 +413,13 @@ R8 的推送结论不变：`github.com` 的 `CONNECT` 仍被代理拒（407）�
 `教学/浮层` 只在注释里命中），`K-14` 只有降级版活着（`src/ui/Calibration.js` 不存在，而砍单建议需人类批复、未批）。
 本轮已按 T2 分域并行派发：W-13 → WORLD agent，K-14 完整版 + `ui` 音效接线 → CORE/SOUND agent；
 两卡各自 verify 门（`render:overlay` / `contract:latency`）由 agent 落成真实断言，我不接受「agent 自述完成」。
+
+**R11 补 · 公共站元数据（13:10）**：`description` 与 10 个 `topics` 已写并复验（`colorblind-safe` 这条的依据是
+`render:grayscale` 门禁真的在断言灰度可辨，不是自封）。两处踩坑记下来别再试：
+① 中文 JSON 走 `curl -d '...'` 经 Git Bash 传参会被改码，报 `Problems parsing JSON` → 必须写成 UTF-8 文件用 `--data-binary @file`；
+② `topics` 用 `PATCH /repos/...` **静默无效**（返回 200 但 `names:[]`），要走专门的 `PUT /repos/{owner}/{repo}/topics`
+且带 `Accept: application/vnd.github.mercy-preview+json`。临时文件已删，`git status` 干净。
+
+**未擅自执行、需需求方点头的一步**：仓库已 public，开 GitHub Pages（`main` 分支或一个 Actions 工作流发布 `dist/`）
+就能给出一条「链接发给朋友即可玩」的在线地址——那是 D9/K-16 最省事的落地，但属于账号层可见变更，
+且 `dist/` 目前在 `.gitignore` 里，要么提交产物要么加工作流。本轮不自己开，等批复。
