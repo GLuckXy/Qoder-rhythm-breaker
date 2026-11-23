@@ -386,3 +386,30 @@ L6 是多声部+最高密度关，实测 `拆解=[kick|bass|synth]` 三轨全拆
 （`encounterRate` 由 leader 在 `LevelRuntime._writeSave:221` 接线，浏览器里读的是接线后的真值）。
 
 仍未验收的（不许因为这张表就当作已过）：真人试玩、音色人耳验收、多浏览器、`QUALITY_PRESETS` 三档观感。
+
+---
+
+## R11 · 需求方批复 → 提交站转为 public + 板状态对账（2026-11-23 13:04–13:09）
+
+**两条批复（AskUserQuestion 的实际回答，原文照抄）**：
+1. 可见性 → 「**改成 public 并给出链接**」；
+2. DEF-05 → 「**接受遭遇口径，先出初版**」。
+
+**可见性执行过程（如实记，含一次失误）**：先写脚本走 `git credential fill` 取 `api.github.com` 的凭据——**该主机没有存量凭据**，
+GCM 直接弹出 GUI 对话框把命令挂死（后台任务 `b9fr2owvl`，已 kill，对话框进程一并清掉）。教训：**在本机任何
+`git credential fill` 必须带 `-c credential.interactive=false` + `timeout`**，否则它会以弹窗形式无限等待，而不是失败返回。
+第二次探 `host=github.com` 拿到 40 字符 `gho_` OAuth token，`/user` 回 `login=GLuckXy`（与仓库属主 id 84197465 一致，
+username 字段写的 `whitenightb` 只是 GCM 里的账号标签，不是另一个账号）。**公开前做了全史泄漏扫描**：
+`git grep -IiE "(ghp_|gho_|github_pat_|PRIVATE KEY|proxy-authorization|AKIA…)" HEAD` 与逐 commit 全仓扫，**命中 0**，
+`git ls-files` 里没有 `.env`/私钥/证书类文件。之后 `PATCH {"private":false,"visibility":"public"}` → `http=200`，
+`visibility:"public"`，**未认证 `GET /repos/GLuckXy/Qoder-rhythm-breaker` 由 404 变 200**（这才是「公共」的判据，不靠 UI 说法）。
+链接：https://github.com/GLuckXy/Qoder-rhythm-breaker （tag `v0.1.0`）。
+
+R8 的推送结论不变：`github.com` 的 `CONNECT` 仍被代理拒（407），**只有 `ssh://git@ssh.github.com:443/...` 能推**；
+`api.github.com` 走代理是通的，所以「改设置/查状态」用 API、「推东西」用 SSH-443，两条路分开用。
+
+**板对账**：`.agent/TASKBOARD.md` 新增「实况状态 · R11」节（原 状态 列是 D0 快照，一直没回写——编排失误，我记这条）。
+审计顺带抓出两处**真实实现缺口**（不是文档滞后）：`W-13 教学浮层` 一行代码都没有（无 `OverlayLayer.js`，
+`教学/浮层` 只在注释里命中），`K-14` 只有降级版活着（`src/ui/Calibration.js` 不存在，而砍单建议需人类批复、未批）。
+本轮已按 T2 分域并行派发：W-13 → WORLD agent，K-14 完整版 + `ui` 音效接线 → CORE/SOUND agent；
+两卡各自 verify 门（`render:overlay` / `contract:latency`）由 agent 落成真实断言，我不接受「agent 自述完成」。
