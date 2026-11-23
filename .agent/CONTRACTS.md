@@ -165,3 +165,63 @@ buildSchedule(levelCfg, clock): [{track, timeSec, dur, gainEnvelope:number[]}]
 ```
 
 规则：CR 未获 APPROVE 前，提出方**不得**假定字段存在；被请求方在下一集成窗口前必须回复（不回视为 T21 冲突，记 `CONFLICTS.md`）。
+
+---
+
+### CR-08 | 提出：CORE | 轮次：R1 | 涉及契约：C1 BeatClock、C2 Judgment、C7 事件流
+
+需求（四点，均为**语义澄清 + 纯新增字段**，不改任何已冻结签名的参数或返回类型）：
+
+1. **C2 / `emptyBeat` 的落地语义**（WORLD、SOUND 都必须读这条）：
+   C2 的 `grade` 枚举里没有「无判定」这个值，而 JDG-04 的 ③ 要求空拍**无惩罚、不入耐久统计、仍记入事件流**。
+   CORE 的实现是：`{ grade:'MISS', rule:'emptyBeat', obstacleId:null, actionMatch:false, penalizes:false }`。
+   **消费方必须先判 `rule === 'emptyBeat'`（或 `penalizes === false`）再落 `grade`**，否则：
+   - DisassembleSystem / HUD 会把空拍扣耐久（违反 JDG-04）；
+   - SOUND 的 ReplayAssembler 会把空拍当成一次真实 MISS 声，破坏「拆解成功瞬间安静」这条验收线（AC-01/04）。
+   事件流侧对应：空拍**只**产生 `input{ hasTarget:false }`，**不**产生 `judge` 事件，所以 §7.3 的 Perfect 率与 `missCount` 重算不会被空拍污染。
+2. **C2 Judgment 新增三个字段**（只增不改，旧消费方可忽略）：
+   `trigger:'input'|'timeout'`（本次判定由玩家输入还是 `BeatClock.schedule` 超时结算产生，JDG-05 归因用）、
+   `penalizes:boolean`（是否计入耐久统计，`emptyBeat` 为 `false`）、`key:'jump'|'dash'|null`（触发键，空拍与超时为 `null`）。
+3. **C1 `tempoChanges` 的过渡解释**（影响 SOUND 第 4 关谱面与 WORLD 的障碍横坐标）：
+   单项 `{ beat, bpm, transitionBeats }` 解释为：过渡区间 `[beat - transitionBeats, beat]`，**在该区间内对「拍长（周期）」做线性插值**（不是对 BPM 插值），到 `beat` 处新 BPM 精确生效。
+   选周期插值的原因：积分是梯形、可解析求原函数，`beatAt / timeAtBeat` 因此**严格互逆**。
+   实测：`timeAtBeat(beatAt(t))` 在 120→140 变速点两侧最坏误差 `6.09e-12 ms`（合同要求 <1ms）。
+   若 SOUND/WORLD 需要「BPM 线性」口径（听觉上鼓点间隔会略不同），请在本条下回复，CORE 会加一个 `ramp:'period'|'bpm'` 可选项而不是改默认值。
+   `BeatClock.getTempoCues()` 返回 `{ beat, targetBeat, bpmFrom, bpmTo, timeSec, targetTimeSec }`（`beat`/`timeSec` 是过渡**起点**，`targetBeat`/`targetTimeSec` 是新 BPM 生效点），DebugPanel 已展示，WORLD 若要在变速前做视觉预告可直接读它。
+4. **C1 `schedule` 的提前量约定**（所有用它做「恰好时刻结算」的人都要注意）：
+   为满足发声预调度，`schedule` 采用 25ms 轮询 + 120ms 视域，**回调可能在 `atSec` 之前最多 120ms 触发**。
+   若你的逻辑必须「不早于 `atSec`」（超时 MISS 结算就是这种），请在回调里自检 `const lead = atSecArg - clock.now();` 并在 `lead > 0.002` 时重新 `schedule` 自己一次。
+   CORE 已在 JudgeSystem 内这样实现，并把「输入容差内提前结算」也做了防重复（同一 obstacle 只会判定一次）。
+
+**新增（不改语义）的 C7 / C1 事件类型**：`C1 onEvent` 除 `beat|section|state` 外，还会在过渡区间起点推送
+`{ type:'tempo', beat, timeSec, fromBpm, toBpm, transitionBeats }`。C1 的注释里已列出该集合，这里是**增量声明**，
+不消费的订阅者按 `type` 分支即可安全忽略。
+
+影响面：WORLD（HUD/DisassembleSystem 需按第 1 条分支，1 张小卡）；SOUND（ReplayAssembler 忽略 `penalizes:false` 的判定、L4 谱面按第 3 条口径打变速）；CORE（无，已实现并有 contractTest 断言覆盖）。
+兼容性：全部为新增字段 / 新增事件类型 / 解释口径澄清；`JudgeSystem.onInput` 的签名与返回值主结构未变，`BeatClock` 全部签名逐字符合 C1。
+待确认：WORLD（`emptyBeat` 分支是否放在 HUD 还是 DisassembleSystem 上游）；SOUND（`tempo` 事件是否够用，还是需要额外的 `tempoProgress` 逐拍字段）。
+结论：**APPROVE（leader 仲裁，2026-11-23）**，四点全部生效，开放问题裁决如下。
+- 第 1 点：`emptyBeat` 的过滤**只在 `DisassembleSystem.onJudgment` 这一个入口做**（CORE 实现，它就是 C3 里 hp 的唯一写入口），HUD 与 `ReplayAssembler` 一律用 `penalizes` 字段过滤展示/发声，**不许各自再写一份「算不算 MISS」的分支**（防 RA1 契约漂移）。事件流「空拍只产 `input`、不产 `judge`」采纳为 C7 的正式口径。
+- 第 2 点：`trigger` / `penalizes` / `key` 三字段批准进 C2，只增不改。
+- 第 3 点：**保持 `period`（拍长）线性为唯一口径，不新增 `ramp` 可选项**（T24 不扩范围）。`timeAtBeat/beatAt` 可解析互逆是本项目的正确性前提，周期插值与 BPM 插值的听感差远小于一个拍间误差。**SOUND 的 L4 变速谱面必须按此口径写。** WORLD 若要做变速视觉预告，直接读 `getTempoCues()`，不要自己推算。
+- 第 4 点：批准，并**升格为 C1 的显式契约条款**：「`schedule` 至多提前 120ms 触发；需要不早于 `atSec` 的回调必须自检 `atSec - clock.now() > 2ms` 后重排」。CORE 需在 `contractTest` 补一条断言：提前触发不得使同一 obstacle 被重复判定。
+- `tempo` 事件类型批准进 C1；`tempoProgress` 暂不加，WORLD 用到时再提 CR。
+
+---
+
+### CR-09 | 提出：CORE | 轮次：R1 | 涉及契约：C4 ObstacleInstance（背景层实例）
+
+需求：C4 的 typedef 需要显式承认「不可判定实例」这一类，并把 SOUND 已在 `PatternGenerator.build()` 里输出的字段写进契约：
+`judgable:boolean`（缺省 `true`）、`track:'bed'`、`layer:'timeline'`、`reason:'hp0'|'intro'|'silence'`、`groupIndex`、`beatWidthSec`、`pxPerSec`。
+理由：R1 联调实测 L1/L2 时，`build()` 返回 94/104 条实例里有 39/48 条是 `track:'bed', type:'bed', judgable:false` 的背景节点。
+它们不是玩家对象：若照旧入队，会被 JDG-05 的超时 MISS 全部判成 MISS（实测 L1 事件流 94 条里 39 条为假 MISS），
+既污染耐久统计（违反 JDG-04「背景层不计入耐久」的意图），也让 §7.3 的 Perfect 率失真。
+CORE 的处理：`JudgeSystem.registerObstacles` 见 `judgable === false` 即**不入队、不挂定时器、不改写该实例的 state/grade**，
+计数进 `JudgeSystem.ignoredCount()`；字段缺省（老数据/其他 agent 造的实例）视为可判定，因此**不需要 SOUND 改任何代码**。
+影响面：SOUND（无需改动，只需确认这些字段的命名与语义长期稳定）；WORLD（渲染层要按 `layer:'timeline'` 把 bed 画在时间轴带而不是判定线通道）。
+兼容性：纯新增可选字段 + CORE 侧的防御性分支；`ObstacleInstance` 的必填字段与 `build()` 签名未变。
+待确认：SOUND（`type:'bed'` 是否会长期存在，还是改用 `track:'bed' + judgable:false` 二选一即可）；WORLD（`pxPerSec`/`beatWidthSec` 由 SOUND 预算是否合理，还是应由 WORLD 用 physics.js 现算）。
+结论：**APPROVE（leader 仲裁，2026-11-23）**，并附两条限定。
+- `judgable:boolean`（缺省 `true`）与 `reason` / `groupIndex` / `layer` 批准进 C4。**判据唯一化：所有消费方（判定、统计、渲染、回放）只允许以 `judgable` 布尔值分流，禁止用 `track === 'bed'` 或 `type === 'bed'` 作为「是不是玩家对象」的判断条件**——将来新增不可判定层（如 L5 假标记）时消费方无需改动。`track:'bed'` 与 `type:'bed'` 允许并存作为 SOUND 的分类标签。
+- **`pxPerSec` 与 `beatWidthSec` 不批**：几何换算归 WORLD，一律由 `physics.js`（C8 的几何唯一真相）+ 当前视口现算。SOUND 预算视口常量会造成第二套 pxPerBeat，正好摧毁 W-02 要断言的「上下层同 pxPerBeat」。**请 SOUND 在下轮从 `build()` 输出里删掉这两个字段**（不阻塞本轮，CORE 不消费它们）。
+- CORE 的 `registerObstacles` 跳过 `judgable === false` 并计入 `ignoredCount()` 的做法批准为长期行为，`ignoredCount()` 需在 DebugPanel 可见（防「静默丢实例」无人发现）。
