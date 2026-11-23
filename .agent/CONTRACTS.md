@@ -251,7 +251,12 @@ CORE 的处理：`JudgeSystem.registerObstacles` 见 `judgable === false` 即**�
 **SOUND 已按 CR-09 删除项**：`build()` 实例不再带 `pxPerSec` / `beatWidthSec`（几何唯一归 physics.js + 视口）；
   需要拍长请调新增的 `PatternGenerator.arrivalSpacing(instances, clock) → [{beat, groupIndex, timeSec, widthSec, ids}]`。
 待确认：CORE（字段白名单是否进 contractTest 断言）；WORLD（`arrivalSpacing` 是否满足 W-04/W-05 的列对齐需求）。
-结论：（由被请求方在此填写 APPROVE / REJECT + 一句理由 + 日期）
+结论：**APPROVE（leader 仲裁，2026-11-23）**，四项全部进 C5/C4。
+- 「8 分音符密铺的鼓在 `minSameTypeGapBeats=1.33` 下物理不可判定」这条理由成立，音床单独成层是正解而非绕行。
+- 限定：**`tracks.bed` 永远不参与 `hp` / 拆解 / Perfect 率分母 / 回放 hp 序列**，消费方读 `disassemble:false` 而不是猜 `hp===0`（`hp:0` 的既有含义「该声部不存在」保持不变，二者语义靠 `disassemble` 区分，这正是本 CR 的价值）。
+- `mapping.platformTiers` 存**分界 MIDI 音高**而非像素——批准，像素归 physics.js + 视口。
+- `contractTest` 需容纳这些新键：CORE 把 C5 字段白名单改成「已知键集合 + 未知键报警不阻断」，并在 case 里断言 `noteEvents.bed` 不产出 `judgable:true` 的实例。
+- WORLD 的 bed 横坐标按 SOUND 建议走 `physics.pxPerSec(view, arrivalSpacing[i].widthSec)`；`arrivalSpacing` 批准为 W-04/W-05 的正式列对齐数据源。
 
 ---
 
@@ -279,5 +284,9 @@ CORE 的处理：`JudgeSystem.registerObstacles` 见 `judgable === false` 即**�
 影响面：CORE（C9 加一行、场景接线三处；`src/main.js` 属 CORE，SOUND 不动手）；WORLD（无）。
 兼容性：`silence/revive/setGain/setVolumes/beatClick` 五个 C6 已冻结方法的名字与语义不变；斜坡常量不变（0.1/0.15s 线性）。
 待确认：CORE（`ensureRunning()` 挂在 `scene.update` 的哪一帧序，以及 K-05 场景生命周期里 `arm()` 的调用点）。
-结论：（由被请求方在此填写 APPROVE / REJECT + 一句理由 + 日期）
+结论：**APPROVE（leader 仲裁，2026-11-23）**，三点全部生效。
+- 第 1 点：`tempoCue(atSec, secondAtSec?)` 批准为 C6 的正式签名（原文档的无参形式从未被任何人调用，属可修文档缺陷而非破坏冻结）；「无参只 warn 一次返回 false 不抛」的容错方式批准。C6 文档由本条批复正式更新，不再另改上文。
+- 第 2 点：`src/audio/SoundEngine.js` **批准进 C9 所有权矩阵，Owner: SOUND**。CORE 的三处接线（每帧 `ensureRunning()`、首次手势 `unlockOnFirstGesture()`、关卡起 `loadLevel`+`arm`）在 R2 由 CORE 落地，帧序裁决为：`scene.update` 内**先 `clock.now()` 取样 → `ensureRunning()` → 判定/渲染**，`arm()` 必须在 `clock.start(atSec)` 之后。
+- 第 3 点：批准，并**追加一条硬约束**：`leadSec < -0.002` 跳过不补发的规则同样适用于超时 MISS 与段落事件；仓库内禁止出现任何 `setTimeout` 型音频/判决定时（CORE 的 `forbid-clock` case 请顺手把 `setTimeout(` 在 `src/audio/**` 与 `src/game/systems/**` 的出现纳入扫描）。
+- SOUND 提出的「一次都没听过」是本项目的 P0 残留风险，已记入 STATE 的 `human-actions`；leader 会在集成轮用真实浏览器跑通发声链路并把 `?selftest=audio` 的 JSON 作为证据，听感门仍留给人类。
 
