@@ -126,6 +126,7 @@
 |---|---|---|---|---|---|
 | K-20 | 数值终调（窗口/无敌帧/输入缓冲/物理常量复核）；main 起只收 bugfix | K-19 | data/config.js, data/physics.js | `contract:all` | ready |
 | W-16 | bloom/粒子/配色终校 + 降级开关（先粒子后 bloom）+ 60s 录屏粗剪 + 5 张截图 | W-15 | systems/EffectSystem.js, data/theme.js | `render:fps` + `🚩逐秒看` | ready |
+| W-18 | `?selftest=render` 的 `pixels[]` 生产侧：定死真帧灰度采样口径（采样点/背景参照/聚合方式），把 `render:selftest` 从 SKIP 变成实测 | CR-16 | render/WorldLayer.js, tools/screenshotCheck.mjs | `render:selftest`（带 `--selftest` 负载实测 PASS，不许理论值顶替） | ready |
 | S-19 | 回放分轨重组（默认 2× 加速版；完整版为 `🚩D5` 未砍时的备选）+ 音频录屏素材 | S-18 | audio/ReplayAssembler.js | `audio:replay` + `🚩与 hp 事件顺序一致` | ready |
 
 ---

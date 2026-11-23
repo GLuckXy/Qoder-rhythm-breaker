@@ -423,3 +423,23 @@ R8 的推送结论不变：`github.com` 的 `CONNECT` 仍被代理拒（407）�
 **未擅自执行、需需求方点头的一步**：仓库已 public，开 GitHub Pages（`main` 分支或一个 Actions 工作流发布 `dist/`）
 就能给出一条「链接发给朋友即可玩」的在线地址——那是 D9/K-16 最省事的落地，但属于账号层可见变更，
 且 `dist/` 目前在 `.gitignore` 里，要么提交产物要么加工作流。本轮不自己开，等批复。
+
+**R11 补 · 陌生人复现实证（此前从未验过的一条）**：把 public HEAD 干净克隆到仓库外
+（`git clone ssh://git@ssh.github.com:443/... /tmp/rb-clean`），独立 `npm i`（98 包 / 14s，仅一条 eslint@9.39.5 弃用告警），
+在那份克隆里跑 `npm run verify:all` → **rc=0，`verify:all -> 5/5 PASS, 0 SKIP, 0 FAIL`**：
+
+```
+[OK  ] contract  802/802 断言 · 17/17 case · 0 skip · 686ms
+[OK  ] level     6关 障碍409 核心114 喘息409处/756拍 空8拍窗0 同拍跨类0 错误0 警告0
+[OK  ] audio     6关 事件757 轨间差max=2.03dB(≤3) 混音阶跃max=0.020(≤0.05) 音符包络227条 回放段60 峰值warn6 错误0 警告19
+[OK  ] render    判定线Δ0px(≤1) 角色x=576=judgeX=0.30W 4拍=883.2px（六 BPM 全等） … 422通过/0失败/1SKIP
+[OK  ] order     17 项顺序与收口断言 · L1/2/3/4/5/6 全部抵达结算
+```
+
+这条补的是「package.json 自足性」：我本地一直有现成 `node_modules`，从没证明过别人拿到仓库能重建环境。
+注意 render 那行的 `1SKIP` 就是 CR-16 的 `pixels[]`（内部组级 SKIP，verifyAll 的「0 SKIP」只看五道门禁的顶层结果，
+两者不矛盾——别把它读成「门禁说谎」）。
+
+**R11 补 · CR-16 / W-18**：`pixels[]` 的生产侧我没有自己填，因为采样口径的三个分歧（采样点、背景参照、聚合方式）
+会改变 L-08「灰度可辨」的含义，而绘制真相归 WORLD。已开 CR-16 并把卡挂到 D8（W-18），
+`render:selftest` 在口径定死之前继续如实记 SKIP，不用理论值冒充实测值刷绿。

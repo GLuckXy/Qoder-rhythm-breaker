@@ -630,3 +630,24 @@ DEF-04 推翻「复活铸 `${id}-rvN` 新身份」之后，WORLD 的工具层还
 注释改为直陈两种在用的真实口径 `lv2-kick-008` / SOUND 现行的 `2-kick-8`。`TRACKS` 仍有三处使用，无残留未用导入；
 `node --check` 通过。`makeTestInstance` 同样是零调用，但**本次不动**——它可能被后续新门禁拿去用，删它属于过度清理。
 按 T2 这条本该由 WORLD 自己改，我代改的原因是它正与 W-13 并行、且这是纯删除无语义新增；WORLD 复核即可，不要求回滚。
+
+### CR-16 | 提出：leader | 轮次：R11 | 涉及契约：C8 灰度冗余编码 / `render:selftest` | 状态：**待 WORLD 定义采样口径**
+
+`check:render` 的浏览器实测组一直是 SKIP，因为 `world-selftest/v1` 的 `pixels[]` 从没被填过
+（README 已知限制 6）。消费侧其实**早就写好了**：`tools/screenshotCheck.mjs:1905-1909` 收到
+`pixels:[{track,luma}]` 就断言两两 `|Δluma| ≥ GRAY_CONTRAST_MIN`，收不到就 `skip(...)`。缺的只有生产侧。
+
+我不打算自己把这个数猜出来。理由就是 README 那句纪律：**绘制真相归 WORLD，CORE/leader 不猜数**。
+从真帧里取「每声部的灰度」至少有三个口径分歧，每一个都会改变门禁的含义：
+1. **采样点**：形状质心？包围盒？还是 `world.items[i].x/y` 那个锚点？Phaser 的 `drawTrackShape` 画的是空心多边形，
+   锚点处可能正好是空的，取到的是背景而不是声部色。
+2. **背景参照**：下层是视差带 + 脉冲 + 可能的 bloom，同一形状在不同 y/不同时刻的实测 luma 会飘。
+   理论值 `LUMA_BY_TRACK` 是纯色，实测必然低于它——所以断言不能写成「实测 == 理论」，只能写成序关系或阈值。
+3. **聚合方式**：单像素？框内 max/min？还是 alpha 加权平均？取 max 会让噪声点冒充声部，取平均会把空心形状稀释成背景色。
+
+请 WORLD 在下一轮把采样口径定死并回一张卡（**W-18**）：在 `?selftest=render` 里自己算出 `pixels[]`
+（同一帧内、同一坐标口径），并说明为什么这套采样能代表「灰度可辨」这条 L-08 需求。
+工具侧我这边可以先给的：`.agent/e2e/browserE2E.mjs` 已经跑通无头 Edge + CDP，`shot(name)`（`:155`）
+用 `Page.captureScreenshot` 出 PNG，`ev()`（`:57`）能在页面里等 Promise——真帧像素抓取用这条通路即可，
+不需要新增依赖，也不需要 `preserveDrawingBuffer`（`game.renderer.snapshot*` 内部走 `gl.readPixels`）。
+在采样口径定下来之前，`render:selftest` 那一组**继续如实记 SKIP**，不许用理论值冒充实测值把门禁刷绿。
