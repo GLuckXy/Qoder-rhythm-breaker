@@ -7,6 +7,8 @@
 //   SAV-03 字段缺失 / JSON 损坏 / 隐私模式禁用 → 静默降级为内存默认档，**不抛错**、只提示一次。
 // v1 内部的加性字段（T5）：levels[id].encounterRate = DEF-05 的「评级口径」Perfect 率（遭遇口径），
 //   与 §7.3 的 perfectRate（谱面口径）并存；version 仍是 1，因为它只加不改语义，老档补默认值即可读。
+//   W-13 追加 options.tutorialSkipped（教学浮层是否被玩家关掉，PRD P2「第 2 次进第 1 关不需要再看」）：
+//   同一个 v1、同一个存储键，老档经 mergeGroup 补 false ⇒ 首次进关照常教学；不新增键、不改任何既有字段语义。
 // 可在 Node 里自验：所有读写都接受注入的 storage 桩（见 tools/contractTest.mjs --case save）。
 
 export const SAVE_KEY = 'rhythm-breaker/save';
@@ -28,7 +30,7 @@ export function defaultSave() {
     version: SAVE_VERSION,
     levels: {},
     audio: { latencyOffset: 0, master: 1, music: 1, sfx: 1, muted: false },
-    options: { showTimelineGuides: true, reduceFlash: false, strictWindow: false, unlockedNudge: true },
+    options: { showTimelineGuides: true, reduceFlash: false, strictWindow: false, unlockedNudge: true, tutorialSkipped: false },
     meta: { firstPlayedAt: 0, totalRuns: 0 }
   };
 }

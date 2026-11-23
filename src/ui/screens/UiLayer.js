@@ -1,10 +1,14 @@
-// src/ui/screens/UiLayer.js — Owner: CORE（K-13 五界面的唯一宿主 + K-15 的流程串接）
+// src/ui/screens/UiLayer.js — Owner: CORE（K-13 五界面的唯一宿主 + K-15 的流程串接 + K-14 校准小游戏入口）
 // 位置：`#ui-root`（L-04：界面是 DOM 覆盖层，canvas 之上、z-index 由 neon.css 给；pointer-events 默认穿透，
 // 只有 button/input/面板本体吃事件）。本文件只做「装配数据 → 建 DOM → 挂/摘 → 把动作交回宿主」，
 // 不含判定、不含时序、不含颜色字面量（CR-13）。
 //
 // 生命周期纪律（K-05）：所有 addEventListener 都过 binder 登记，close()/destroy() 必须把节点摘干净，
 // 20 次重开不得留下任何一个界面节点（contractTest 的 screens case 就是数这个）。
+//
+// `ui` 音效（SFX_TRIGGERS：「调用点直发：UI 按钮与关卡选择」）：唯一通路是 `playUiSound()` →
+// `engine.playSfx('ui')`（C6 冻结方法），五个界面的每一颗按钮都调它。**这里不 new AudioContext、
+// 不挂解锁监听**（CR-11：解锁只在 main.js 一处），引擎没接上时静默跳过。
 
 import { mountRoot, detach, binder } from './dom.js';
 import { buildTitle } from './titleScreen.js';
@@ -12,13 +16,15 @@ import { buildSelect } from './levelSelect.js';
 import { buildPause } from './pauseScreen.js';
 import { buildSettings } from './settingsScreen.js';
 import { buildResult } from './resultScreen.js';
+import { createCalibrationPanel, calibrationAvailability } from '../Calibration.js';
 import { getSave, updateSave } from '../../data/save.js';
 
-const NAMES = ['title', 'select', 'pause', 'settings', 'result'];
+const NAMES = ['title', 'select', 'pause', 'settings', 'result', 'calibration'];
 
 /**
  * @param {{root?:object, clock:object, judge:object, ds:object, engine:object,
- *   levels?:Function, gotoLevel:Function, toTitle:Function, runtime?:Function}} deps
+ *   levels?:Function, gotoLevel:Function, toTitle:Function, runtime?:Function,
+ *   cal?:{clock?:object, now?:Function, click?:Function}}} deps
  */
 export function createUiLayer(deps = {}) {
   const root = mountRoot(deps);
@@ -26,6 +32,7 @@ export function createUiLayer(deps = {}) {
   let currentEl = null;
   let currentName = null;
   let settingsReturn = 'title';
+  let calPanel = null; // K-14：校准面板只许同时存在一份（会话在跑时它持有那个独立 BeatClock）
 
   /* ---------------- 存档侧的写入口（唯一一份，界面不各自存） ---------------- */
 
@@ -59,6 +66,26 @@ export function createUiLayer(deps = {}) {
     return typeof deps.runtime === 'function' ? deps.runtime() : null;
   }
 
+  /** 当前生效的延迟补偿（judge 是真相，存档只是它的镜像）。 */
+  function readLatency() {
+    if (deps.judge && typeof deps.judge.getLatency === 'function') return Number(deps.judge.getLatency()) || 0;
+    return Number(getSave().audio.latencyOffset) || 0;
+  }
+
+  /* ---------------- `ui` 音效：五界面 + 关卡选择的唯一调用点 ---------------- */
+
+  function playUiSound() {
+    if (deps.engine && typeof deps.engine.playSfx === 'function') {
+      try {
+        deps.engine.playSfx('ui');
+      } catch {
+        /* 音效不许把界面点击带下水（引擎未解锁时 SoundEngine 自己会跳过） */
+      }
+      return true;
+    }
+    return false;
+  }
+
   /** deps.levels() 允许是同步数组或异步清单（要 await level*.json 的标题/BPM）。 */
   function levelList() {
     const raw = typeof deps.levels === 'function' ? deps.levels() : [];
@@ -79,12 +106,55 @@ export function createUiLayer(deps = {}) {
 
   /** 关掉当前界面（不动其它层）。返回是否真的摘掉了节点。 */
   function close() {
+    closeCalibration();
     if (!currentEl) return false;
     detach(currentEl);
     currentEl = null;
     currentName = null;
     settingsReturn = 'title';
     return true;
+  }
+
+  /* ---------------- ⑥ 校准小游戏（K-14 完整版；入口在设置与暂停两处） ---------------- */
+
+  /**
+   * 校准面板停表 + 摘键盘监听（DOM 由 close() 摘）。没开过面板就是空操作。
+   * @returns {boolean}
+   */
+  function closeCalibration() {
+    if (!calPanel) return false;
+    calPanel.stop(); // 会话 stop() = clock.stop()（PERF-08 不留轮询）+ window keydown 退订
+    calPanel = null;
+    return true;
+  }
+
+  /**
+   * @param {{back?:Function, from?:string}} [opt] back = 「取消/返回」要回哪一层（调用方给闭包；
+   *   沿用 showSettings 的老坑规避：mount()→close() 会复位 settingsReturn，回跳目标必须提前抓住）
+   */
+  function showCalibration(opt = {}) {
+    const rt = runtime();
+    const backTo = typeof opt.back === 'function' ? opt.back : () => showTitle();
+    closeCalibration();
+    const panel = createCalibrationPanel({
+      engine: deps.engine,
+      cal: deps.cal, // 测试注入口（contractTest latency case 用 MockClock 驱动会话）；生产缺省 = 独立 BeatClock + engine.ctx.currentTime
+      host: typeof window !== 'undefined' ? window : null,
+      availability: calibrationAvailability(deps.engine, rt ? { paused: !!rt.paused } : null),
+      apply: applyLatency, // ★ 唯一写入通路：judge.setLatency + updateSave({audio:{latencyOffset}})
+      getLatency: readLatency,
+      windows: () => (deps.judge && typeof deps.judge.windows === 'function' ? deps.judge.windows() : null),
+      uiSound: playUiSound,
+      onBack: () => {
+        closeCalibration();
+        backTo();
+      }
+    });
+    // 先 mount 再登记：mount() 内部会 close()，而 close() 会顺手关掉上一份校准面板，
+    // 反过来写就是「刚登记就被自己关掉」。
+    const el = mount('calibration', panel.element);
+    calPanel = panel;
+    return el;
   }
 
   /* ---------------- ① 标题 ---------------- */
@@ -99,6 +169,7 @@ export function createUiLayer(deps = {}) {
           { notice: data.notice || '', levels, resumeId: resume },
           {
             engine: deps.engine,
+            uiSound: playUiSound,
             gotoLevel: (id) => deps.gotoLevel(id),
             onSelect: () => showSelect(),
             onSettings: () => showSettings('title')
@@ -117,6 +188,7 @@ export function createUiLayer(deps = {}) {
         buildSelect(
           { levels, entries: getSave().levels || {} },
           {
+            uiSound: playUiSound,
             onPick: (id) => deps.gotoLevel(id),
             onBack: () => {
               const back = settingsReturn === 'pause' ? showPause() : showTitle();
@@ -151,6 +223,8 @@ export function createUiLayer(deps = {}) {
     return mount(
       'pause',
       buildPause(pauseData(), {
+        uiSound: playUiSound,
+        onCalibrate: () => showCalibration({ from: 'pause', back: () => showPause() }),
         onResume: () => {
           const rt = runtime();
           if (rt && rt.paused) rt.togglePause(); // ★ 唯一解冻路径：clock.resume()
@@ -194,9 +268,11 @@ export function createUiLayer(deps = {}) {
     return mount(
       'settings',
       buildSettings(settingsData(), {
+        uiSound: playUiSound,
         onVolumes: applyVolumes,
         onStrict: applyStrict,
         onLatency: applyLatency,
+        onCalibrate: () => showCalibration({ from: 'settings', back: () => showSettings(origin) }),
         onBack: () => {
           close();
           if (origin === 'pause') showPause();
@@ -225,6 +301,7 @@ export function createUiLayer(deps = {}) {
         buildResult(
           { stats, level, hpMax, hasNext, nextId: hasNext ? ids[idx + 1] : null, allCleared },
           {
+            uiSound: playUiSound,
             onNext: (id) => deps.gotoLevel(id),
             onRetry: () => {
               close();
@@ -261,6 +338,9 @@ export function createUiLayer(deps = {}) {
     showPause,
     showSettings,
     showResult,
+    showCalibration,
+    calibration: () => calPanel,
+    playUiSound,
     close,
     destroy,
     applyVolumes,

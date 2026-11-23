@@ -152,7 +152,8 @@ npm run verify:all       # 依次跑上面五道 + lint，任一红即退出码�
 9. **favicon 走内联 data-URI SVG**（`index.html`），不新增素材文件；这同时消掉了 `/favicon.ico` 的两条 404，
    「console 零报错」这条验收线目前只在 L1 路径上核过。
 10. **音效里 `revive` / `ui` 两个是「调用点直发」**（SOUND 的 `SFX_TRIGGERS` 明确登记 C7 事件流里没有这两类）。
-    `revive` 已接在 `LevelRuntime._onRevive`；**界面按钮的 `ui` 声尚未接线**（不影响判定与音乐）。
+    `revive` 已接在 `LevelRuntime._onRevive`；`ui` 已接在 5 个界面的按钮与面板上（`playSfx('ui')` → `Sfx.SFX_NAMES`），
+    只剩设置页的音量滑杆与严格模式勾选没有反馈音（记在 K-14 的收尾清单里，不影响判定与音乐）。
 11. **评级口径曾有一处需求缺口，v0.1 的工程裁决已被需求方接受**（`.agent/CONTRACTS.md` DEF-05）。§7.3 把分母固定成全谱面障碍数，
     而「拆解完成即退役该轨剩余障碍」使分子上限远小于分母——实测「一个不漏全打中」也只有 `L1 4/55=0.073`，
     `S ≥ 0.85 / A ≥ 0.70` 在六张出厂谱面上不可达，徽章与存档最高评级形同废功能。

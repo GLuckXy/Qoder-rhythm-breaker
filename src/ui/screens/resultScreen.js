@@ -67,7 +67,7 @@ function trackRow(track, hp, hpMax, silenced) {
 
 /**
  * @param {{stats:object, level?:object, hpMax?:object, hasNext:boolean, nextId?:number, allCleared?:boolean}} data
- * @param {{onNext:Function, onRetry:Function, onSelect:Function, onTitle:Function}} deps
+ * @param {{onNext:Function, onRetry:Function, onSelect:Function, onTitle:Function, uiSound?:Function}} deps
  */
 export function buildResult(data = {}, deps = {}) {
   const st = data.stats || {};
@@ -76,16 +76,21 @@ export function buildResult(data = {}, deps = {}) {
   const rank = st.rank || 'C';
   const active = ['kick', 'bass', 'synth'].filter((t) => hpMax[t] > 0);
 
-  const next = primaryButton(data.hasNext ? `下一关 · L${data.nextId}` : data.allCleared ? '全部通关 · 回标题' : '回标题', () => {
+  const act = (fn) => () => {
+    if (deps.uiSound) deps.uiSound(); // SFX_TRIGGERS.ui：调用点直发
+    if (fn) fn();
+  };
+
+  const next = primaryButton(data.hasNext ? `下一关 · L${data.nextId}` : data.allCleared ? '全部通关 · 回标题' : '回标题', act(() => {
     if (data.hasNext && deps.onNext) deps.onNext(data.nextId);
     else if (deps.onTitle) deps.onTitle({ notice: data.allCleared ? '六关全部拆解完成 · 通关' : '回到标题' });
-  });
+  }));
   next.setAttribute('data-role', st.disassembled ? 'result-next' : 'result-next-incomplete');
-  const retry = button('重开本关（R）', () => deps.onRetry && deps.onRetry());
+  const retry = button('重开本关（R）', act(() => deps.onRetry && deps.onRetry()));
   retry.setAttribute('data-role', 'result-retry');
-  const select = button('选关', () => deps.onSelect && deps.onSelect());
+  const select = button('选关', act(() => deps.onSelect && deps.onSelect()));
   select.setAttribute('data-role', 'result-select');
-  const title = button('回标题', () => deps.onTitle && deps.onTitle({ notice: `L${(data.level || {}).id ?? '?'} 已结算` }));
+  const title = button('回标题', act(() => deps.onTitle && deps.onTitle({ notice: `L${(data.level || {}).id ?? '?'} 已结算` })));
   title.setAttribute('data-role', 'result-title');
 
   const enc = Number.isFinite(st.encounterRate);

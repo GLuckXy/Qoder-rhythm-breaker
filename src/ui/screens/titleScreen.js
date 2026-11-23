@@ -6,7 +6,7 @@ import { row, col, headline, caption, panel, primaryButton, button } from './dom
 
 /**
  * @param {{notice?:string, resumeId?:number, levels?:Array<{id:number,title:string,bpm:number,cleared:boolean}>}} data
- * @param {{onSelect:Function, onSettings:Function, gotoLevel:Function, engine?:object}} deps
+ * @param {{onSelect:Function, onSettings:Function, gotoLevel:Function, engine?:object, uiSound?:Function}} deps
  */
 export function buildTitle(data = {}, deps = {}) {
   const levels = Array.isArray(data.levels) ? data.levels : [];
@@ -14,14 +14,21 @@ export function buildTitle(data = {}, deps = {}) {
   const cleared = levels.filter((l) => l.cleared).length;
 
   const start = primaryButton(`开始 · L${next}`, () => {
+    if (deps.uiSound) deps.uiSound(); // SFX_TRIGGERS.ui：调用点直发（通路在 UiLayer.playUiSound → engine.playSfx）
     if (deps.engine && typeof deps.engine.ensureRunning === 'function') deps.engine.ensureRunning();
     if (deps.gotoLevel) deps.gotoLevel(next);
   });
   start.setAttribute('data-role', 'title-start');
 
-  const select = button('选关', () => deps.onSelect && deps.onSelect());
+  const select = button('选关', () => {
+    if (deps.uiSound) deps.uiSound();
+    if (deps.onSelect) deps.onSelect();
+  });
   select.setAttribute('data-role', 'title-select');
-  const settings = button('设置', () => deps.onSettings && deps.onSettings());
+  const settings = button('设置', () => {
+    if (deps.uiSound) deps.uiSound();
+    if (deps.onSettings) deps.onSettings();
+  });
   settings.setAttribute('data-role', 'title-settings');
 
   return panel(

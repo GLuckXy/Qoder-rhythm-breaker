@@ -87,7 +87,7 @@
 | K-11 | 寂静段（光点逐拍踩灭）+ 终点演出 + `SILENCE` 段内 MISS 不复活 + `DISASSEMBLED→PEAK` 世界重建 | K-07 | systems/DisassembleSystem.js, scenes/LevelScene.js | `contract:silence` | ready |
 | K-12 | L6 `freeOrder`：三声部核心同时常驻可交互，顺序不影响段落进入 | K-07 | systems/DisassembleSystem.js | `contract:freeorder` | ready |
 | W-12 | 变速下时间轴按拍等距 + 假节拍渲染层（偏移标记 + 故障闪烁，**不污染判定与音频**） | W-05 | objects/Timeline.js | `render:ghost` | ready |
-| W-13 | 教学浮层渲染（前 8 拍 3 步、可跳过、不遮挡判定线） | W-01 | render/OverlayLayer.js | `render:overlay` + `🚩20 拍内首次 PERFECT` | active·派 WORLD |
+| W-13 | 教学浮层渲染（前 8 拍 3 步、可跳过、不遮挡判定线） | W-01 | render/OverlayLayer.js | `render:overlay` + `🚩20 拍内首次 PERFECT` | delivered·leader 收尾（DEF-06 修完，overlay 段 550/0/1SKIP） |
 | S-13 | L4 变速谱面与编曲（`tempoChanges` 120→140，2 拍过渡提示，密度 2.5） | S-10 | data/levels/level4.json | `level:lv4` + `contract:tempo` | ready |
 | S-14 | L5 谱面与编曲（Glitch，`ghostBeats` ≤8 处且不落核心拍） | S-10 | data/levels/level5.json | `level:lv5` | ready |
 | S-15 | L6 谱面与编曲（完整编曲，密度 3.0，单声部核心 ≥6 个容错） | S-10 | data/levels/level6.json | `level:lv6` | ready |
@@ -102,7 +102,7 @@
 | 卡 | 内容 | 依赖 | writes | verify | 状态 |
 |---|---|---|---|---|---|
 | K-13 | 五界面：标题（点击 = AudioContext resume）/ 选关（徽章 + Perfect 率）/ 暂停（调 `clock.pause`）/ 设置 / 结算 | K-05, K-08 | ui/screens/*.js | `build` + `render:screens` + `🚩T11` | ready |
-| K-14 | 校准（小游戏取中位数，或降级版仅 `[ ]` 微调 + 当前值显示）+ 设置项持久化 | K-08 | ui/Calibration.js, data/config.js | `contract:latency` | active·派 CORE/SOUND·完整版 |
+| K-14 | 校准（小游戏取中位数，或降级版仅 `[ ]` 微调 + 当前值显示）+ 设置项持久化 | K-08 | ui/Calibration.js, data/config.js | `contract:latency` | delivered·遗留 K-20/K-21（静音防护、可用性快照） |OUND·完整版 |
 | K-15 | 教学触发与全流程串接 + 跳转图核对（标题→L1→…→L6→结算→下一关） | K-13 | ui/Popup.js, scenes/LevelScene.js | `🚩无断点走查` | ready |
 | W-14 | 上层世界 polish：2 层视差、边缘脉冲、地面线质感、分关色温（消费 S-12 的 CR） | S-12 | render/Background.js, systems/EffectSystem.js, data/theme.js | `render:perlevel` | ready |
 | S-17 | 音量三通道（主/音乐/音效）+ 六关混音终版（轨间差 ≤3dB） | S-07 | audio/TrackMixer.js | `audio:loudness` | ready |
@@ -185,3 +185,27 @@
 
 **🚩 人类门禁累计未过（agent 无权代判，T20）**：音色候选 3 套（S-02）、审美门 1 音色冻结（D3）、拆解演出 15s GIF（W-07）、能否指出核心节点（W-11）、D5 砍单决策、20 拍内首次 PERFECT（W-13）、审美门 2 试玩（D7）、审美门 3 录屏（D8）、线上无 404 与兼容矩阵（D9）。
 README「已知限制」1/2/3/4/5/10 条正是这些缺口的如实登记，不是待修的 bug 清单。
+
+## 实况状态 · R12（leader，2026-11-23）
+
+两个在派 agent（W-13 浮层、K-14 校准）都在 **150 轮上限处被截断**，最后一条消息分别是
+「Now writing the overlay module」「Now let me fix several structural problems…（duplicate data-role、
+fake-DOM 不支持的 removeAttribute、残留 60/bpm）」——也就是说它们**停在手还没收的状态**，
+工作区里同时存在半成品与正在写的文件。这一轮由 leader 直接收尾，不再重派 agent：
+重派的代价（27M/25M token、34min、仍可能撞上限）明显高于把 2 条红断言修绿。
+
+| 卡 | 结果 | 证据 |
+|---|---|---|
+| W-13 | delivered（leader 收尾） | `render:overlay` 550 通过 / 0 失败 / 1 SKIP；`verify:all -> 5/5 PASS` |
+| K-14 | delivered，遗留 2 条防护缺陷 | `contract:latency` 绿；`calibrate` 入口在 settings 与 pause 两处都接通（reviewer 核） |
+| S-08 | 已交付，本轮未动 | `audio:sfx` 绿，`playSfx('ui')` 在 5 屏 + 面板都有调用，SFX_NAMES 含 `ui` |
+| DEF-06 | **结案**（见 CONTRACTS CR-19） | 教学文案改走形状 + 可达性模式，颜色词绑形状的写法 0 处；门禁新增 5 条断言盯着这件事 |
+
+### 新增卡（R12 派不出去的先记账，不代改）
+
+| 卡 | 任务 | 依赖 | 涉及文件 | 验收 | 状态 |
+|---|---|---|---|---|---|
+| K-20 | 校准小游戏要在**听不见时拒绝开局**：静音/主音量为 0 时 `sounded.add(k)` 仍记为已听，写进去的中位数是垃圾 | K-14 | ui/Calibration.js | `contract:latency` 加一条：master=0 或 mixer 静音时 `calibrationAvailability` 不可用且 `start()` 拒绝 | ready |
+| K-21 | 面板可用性是**构造时快照**（`UiLayer.js:143` 直接赋值 `calibrationAvailability(...)`），解锁/暂停状态变化后不重算 | K-14 | ui/screens/UiLayer.js | 改成 thunk，`render()`/`start()` 里现算；补一条断言：availability 变化后面板文案跟着变 | ready |
+| K-22 | judge 事件补 `beat` 字段（CR-18 要求的唯一前置）；T22 第 ④ 路和 K-19 变速栏在字段补齐前只能是 `SKIP` | CR-18 | systems/JudgeSystem.js | `node tools/playtestReport.mjs` 的 ④ 不再报「无口径」 | ready |
+| K-23 | JDG-09 写的是「8 拍跟拍取中位数」，实现丢 2 个 warmup 后取 6 个的中位数，注释把它说成 JDG-09 原文（`config.js:87`） | K-14 | ui/Calibration.js, data/config.js | 二选一：warmup 默认 0（真按 8 个取），或把这条自称改写成工程决定并走 CR 登记 | ready |

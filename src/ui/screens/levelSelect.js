@@ -32,17 +32,23 @@ function card(level, entry, onPick) {
 
 /**
  * @param {{levels:Array<object>, entries:Record<string,object>}} data
- * @param {{onPick:Function, onBack:Function}} deps
+ * @param {{onPick:Function, onBack:Function, uiSound?:Function}} deps
  */
 export function buildSelect(data = {}, deps = {}) {
   const levels = Array.isArray(data.levels) ? data.levels : [];
   const entries = data.entries || {};
-  const back = button('返回标题', () => deps.onBack && deps.onBack());
+  const back = button('返回标题', () => {
+    if (deps.uiSound) deps.uiSound(); // SFX_TRIGGERS.ui
+    if (deps.onBack) deps.onBack();
+  });
   back.setAttribute('data-role', 'select-back');
   const grid = h(
     'div',
     { dataset: { role: 'level-grid' }, style: 'display:flex;gap:.7em;flex-wrap:wrap;justify-content:flex-start' },
-    levels.map((l) => card(l, entries[String(l.id)] || entries[l.id], (id) => deps.onPick && deps.onPick(id)))
+    levels.map((l) => card(l, entries[String(l.id)] || entries[l.id], (id) => {
+      if (deps.uiSound) deps.uiSound(); // 「关卡选择」本身就是 ui 音效登记的那件事
+      if (deps.onPick) deps.onPick(id);
+    }))
   );
   if (!levels.length) grid.appendChild(caption('尚无谱面（SOUND 名下 level*.json 未就位）'));
 

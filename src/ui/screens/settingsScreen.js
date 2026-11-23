@@ -1,7 +1,9 @@
-// src/ui/screens/settingsScreen.js — Owner: CORE（K-13 界面④：设置 + K-14 降级版校准）
+// src/ui/screens/settingsScreen.js — Owner: CORE（K-13 界面④：设置 + K-14 校准入口）
 // 音量三通道唯一的写入口是 SOUND 的 engine.setVolumes({master,music,sfx})（CR-12 批复：不在界面里碰 GainNode）；
-// 严格窗口走 judge.setStrictWindow；延迟补偿走 judge.setLatency + config.nudgeLatency 的钳位（K-14 只做 [ / ] 手动微调，
-// 不做校准小游戏 —— leader 决策 L-06）。所有取值同时写进 save（存档口径见 src/data/save.js）。
+// 严格窗口走 judge.setStrictWindow；延迟补偿走 judge.setLatency + config.nudgeLatency 的钳位。
+// K-14 完整版（leader 批复：降级版一条不许掉）：这里既保留 ±1ms 手动微调（JDG-09），也挂「校准小游戏」入口，
+// 小游戏本体与写入通路在 src/ui/Calibration.js + UiLayer.showCalibration，本文件只出入口、不含时序。
+// 所有取值同时写进 save（存档口径见 src/data/save.js）。
 
 import { h, row, col, headline, caption, panel, primaryButton, button } from './dom.js';
 import { nudgeLatency, CALIBRATION } from '../../data/config.js';
@@ -28,7 +30,7 @@ function volumeChannel(key, label, value, onInput) {
 
 /**
  * @param {{volumes:object, strictWindow:boolean, latencyMs:number, windows?:object, muted?:boolean}} data
- * @param {{onVolumes:Function, onStrict:Function, onLatency:Function, onBack:Function}} deps
+ * @param {{onVolumes:Function, onStrict:Function, onLatency:Function, onBack:Function, onCalibrate?:Function, uiSound?:Function}} deps
  */
 export function buildSettings(data = {}, deps = {}) {
   const vol = data.volumes || { master: 1, music: 1, sfx: 1 };
@@ -50,6 +52,7 @@ export function buildSettings(data = {}, deps = {}) {
   const latOut = h('span', { class: 'rb-text rb-text-body rb-num', dataset: { role: 'latency-out' }, text: `${Math.round(Number(data.latencyMs) || 0)}ms` });
   const latBtn = (dir) => {
     const b = button(dir > 0 ? '＋1ms' : '－1ms', () => {
+      if (deps.uiSound) deps.uiSound(); // SFX_TRIGGERS.ui：调用点直发
       const next = nudgeLatency(Number(data.latencyMs) || 0, dir);
       data.latencyMs = next;
       latOut.textContent = `${Math.round(next)}ms`;
@@ -59,8 +62,18 @@ export function buildSettings(data = {}, deps = {}) {
     return b;
   };
 
-  const back = primaryButton('返回', () => deps.onBack && deps.onBack());
+  const back = primaryButton('返回', () => {
+    if (deps.uiSound) deps.uiSound();
+    if (deps.onBack) deps.onBack();
+  });
   back.setAttribute('data-role', 'settings-back');
+
+  // K-14 完整版入口：8 拍跟节拍器敲击 → 取中位数写入（面板自己会说明当前能不能打小游戏）
+  const calibrate = button('校准小游戏（跟拍 8 下 · 取中位数）', () => {
+    if (deps.uiSound) deps.uiSound();
+    if (deps.onCalibrate) deps.onCalibrate();
+  });
+  calibrate.setAttribute('data-role', 'open-calibration');
 
   const w = data.windows || {};
   return panel(
@@ -76,9 +89,10 @@ export function buildSettings(data = {}, deps = {}) {
           latBtn(-1),
           latOut,
           latBtn(1),
-          caption(`游戏内 [ / ] 每步 ${CALIBRATION.stepMs}ms，范围 ${CALIBRATION.minMs}..${CALIBRATION.maxMs}ms（L-06：本轮不做校准小游戏）`)
+          caption(`±1ms：每步 ${CALIBRATION.stepMs}ms，范围 ${CALIBRATION.minMs}..${CALIBRATION.maxMs}ms（游戏内 [ / ] 同一步长）；「重置为 0」与校准小游戏在下面的面板里（JDG-09）`)
         ]),
         caption(w.perfectMs != null ? `当前判定窗：PERFECT ±${Number(w.perfectMs).toFixed(1)}ms · GOOD ±${Number(w.goodMs).toFixed(1)}ms` : '判定窗：进入关卡后可读'),
+        calibrate,
         back
       ].filter(Boolean),
       { style: 'gap:.7em;align-items:flex-start' }

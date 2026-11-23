@@ -201,6 +201,7 @@ const SELFTEST_SCHEMA = 'world-selftest/v1';
  *   { schema, nowSec, viewport:{width,height}, dpr,
  *     world: WorldLayer.snapshot(nowSec),
  *     timeline: new Timeline().snapshot({view,nowSec,instances}),
+ *     overlay: OverlayLayer.snapshot(),   // W-13 教学浮层（schema-append 的顶层新键，旧字段一字不动）
  *     pixels: [{track,luma}] | [] }
  * 两层吃**同一批 instances 与同一个 view**，否则 runSelftest 的「逐实例 x 比对」会 SKIP。
  * pixels 要 readPixels（绘制真相归 WORLD），CORE 不猜灰度值 → 留空数组，那边自带 SKIP 分支。
@@ -220,6 +221,7 @@ export async function runWorldSelftest(opt = {}) {
     dpr: typeof window !== 'undefined' ? Number(window.devicePixelRatio) || 1 : 1,
     world: null,
     timeline: null,
+    overlay: null,
     pixels: [],
     checks: { result: 'FAIL', consoleErrors: 0, errors, notes: [], samples: [], stats: null, stats2: null, sound: null }
   };
@@ -253,6 +255,9 @@ export async function runWorldSelftest(opt = {}) {
   payload.nowSec = nowSec;
   payload.viewport = { width: view.width, height: view.height };
   payload.world = rt.world.snapshot(nowSec);
+  // W-13 教学浮层：把「第几拍、第几步、框在哪」原样交出去，Node 侧按同一套断言复核（未知键 = 旧负载照常通过）。
+  if (rt.overlay && typeof rt.overlay.snapshot === 'function') payload.overlay = rt.overlay.snapshot();
+  else errors.push('rt.overlay 缺失：LevelRuntime 的教学接线断了（W-13）');
   if (opt.timeline !== false) {
     try {
       // 动态 import：Timeline 归 WORLD，只在这条路由需要，装不进也只降级掉 timeline 一项。

@@ -14,20 +14,29 @@ function line(label, value) {
 
 /**
  * @param {{stats?:object, clock?:object, latencyMs?:number, level?:object}} data
- * @param {{onResume:Function, onRestart:Function, onSettings:Function, onQuit:Function}} deps
+ * @param {{onResume:Function, onRestart:Function, onSettings:Function, onQuit:Function, onCalibrate?:Function, uiSound?:Function}} deps
  */
 export function buildPause(data = {}, deps = {}) {
   const st = data.stats || {};
   const clock = data.clock || null;
   const paused = !!(clock && typeof clock.isPaused === 'function' && clock.isPaused());
 
-  const resume = primaryButton('继续（Esc）', () => deps.onResume && deps.onResume());
+  const act = (fn) => () => {
+    if (deps.uiSound) deps.uiSound(); // SFX_TRIGGERS.ui：调用点直发
+    if (fn) fn();
+  };
+
+  const resume = primaryButton('继续（Esc）', act(() => deps.onResume && deps.onResume()));
   resume.setAttribute('data-role', 'pause-resume');
-  const restart = button('重开本局（R）', () => deps.onRestart && deps.onRestart());
+  const restart = button('重开本局（R）', act(() => deps.onRestart && deps.onRestart()));
   restart.setAttribute('data-role', 'pause-restart');
-  const settings = button('设置', () => deps.onSettings && deps.onSettings());
+  const settings = button('设置', act(() => deps.onSettings && deps.onSettings()));
   settings.setAttribute('data-role', 'pause-settings');
-  const quit = button('回标题（Q）', () => deps.onQuit && deps.onQuit());
+  // UI-05：暂停面板要有校准入口。此处音频钟被 clock.pause() 冻住（R11），
+  // 面板会如实说明「小游戏不可用 → 用 ±1ms 微调」，从标题/结算进设置才打得成小游戏。
+  const calibrate = button('校准（小游戏 / ±1ms 微调）', act(() => deps.onCalibrate && deps.onCalibrate()));
+  calibrate.setAttribute('data-role', 'pause-calibrate');
+  const quit = button('回标题（Q）', act(() => deps.onQuit && deps.onQuit()));
   quit.setAttribute('data-role', 'pause-quit');
 
   const beat = clock && typeof clock.currentBeat === 'function' ? clock.currentBeat().toFixed(2) : '—';
@@ -54,7 +63,7 @@ export function buildPause(data = {}, deps = {}) {
               })
             )
           : null,
-        row([resume, restart, settings, quit])
+        row([resume, restart, settings, calibrate, quit])
       ].filter(Boolean),
       { style: 'gap:.55em' }
     ),

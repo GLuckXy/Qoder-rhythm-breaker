@@ -8,6 +8,10 @@
 //   ④ 统一 shutdown()：interval / 音源指针 / 监听 / Phaser 事件**全部登记在 this._offs**，逐条释放
 //
 // 不在此文件：判定算法（JudgeSystem）、hp 与状态机（DisassembleSystem）、绘制（WORLD 的 WorldLayer）、发声（SOUND 的 SoundEngine）。
+//
+// W-13 教学浮层的最小接线（leader 授权，只做四件事，全部走已有通道）：
+//   装载时 overlay.init(scene, view) → 每帧 overlay.sync({clock, beat}) → H/点击 → skipTutorial() 落存档
+//   → shutdown() 里释放。浮层的显隐与换步**只由拍决定**（拍来自 BeatClock），本文件不替它记任何秒表。
 
 import { buildView } from '../../data/theme.js';
 import { nudgeLatency } from '../../data/config.js';
@@ -15,6 +19,7 @@ import { getSave, updateSave } from '../../data/save.js';
 import * as PG from '../systems/PatternGenerator.js';
 import { expectedAction } from '../systems/JudgeSystem.js';
 import { GAME_STATES } from '../systems/DisassembleSystem.js';
+import OverlayLayer from '../render/OverlayLayer.js';
 
 /** 键位（JDG-01）。左右微调属 WORLD 的角色，这里只登记不实现。 */
 export const KEYMAP = Object.freeze({
@@ -24,7 +29,9 @@ export const KEYMAP = Object.freeze({
   pause: ['ESC'],
   calDown: ['OPEN_BRACKET'],
   calUp: ['CLOSE_BRACKET'],
-  quit: ['Q']
+  quit: ['Q'],
+  /** W-13 教学浮层的跳过键。**不能**复用空格/J：教学期玩家正要按它拿首个 PERFECT。 */
+  skipTutorial: ['H']
 });
 
 const START_LEAD_SEC = 0.35; // 第 0 拍钉在未来，保证 intro 的 4 拍倒计时也能被预调度到
@@ -59,6 +66,12 @@ export class LevelRuntime {
     this.restarts = 0;
     this.startedAtSec = 0;
     this.view = buildView(1280, 720, {});
+    /**
+     * W-13 教学浮层（WORLD 名下的纯呈现层）。这里只做三件事：给 view/host、给拍、把跳过写进存档。
+     * 键面来自 KEYMAP（唯一键位真相），动作归属来自 JudgeSystem.expectedAction（唯一动作真相）——
+     * 浮层自己不复述任何一张表，所以改键 / 改判定动作都不会让教学文案变成假话。
+     */
+    this.overlay = deps.overlay || new OverlayLayer({ expectedAction: (type) => this.expectedActionFor(type), keymap: KEYMAP });
   }
 
   /* ---------------- ① 装载 ---------------- */
@@ -67,6 +80,7 @@ export class LevelRuntime {
   create() {
     this.view = buildView(this.scene.scale.width || 1280, this.scene.scale.height || 720, {});
     this.world.init(this.scene, this.view);
+    this.overlay.init(this.scene, this.view); // W-13：与 world 同一个 host、同一个 view
 
     const save = getSave();
     this.judge.setStrictWindow(!!save.options.strictWindow);
@@ -83,6 +97,7 @@ export class LevelRuntime {
     this._off(this.ds.on('state-change', (p) => this._onStateChange(p)));
 
     this._bindKeys();
+    this._bindPointer();
     this.start();
     return this;
   }
@@ -104,6 +119,9 @@ export class LevelRuntime {
     this._extra = {};
     this._judgment = null;
     this.finished = false;
+    // W-13：起关与重开（R）是同一条路 ⇒ 本局浮层显示态清零，「是否已跳过」只认存档。
+    // 教学态若跨局残留（第 20 拍还浮着第 3 步），T6 的 20 次重开一致性就先崩在这里。
+    this.overlay.beginRun({ levelId: cfg.id, skipped: !!(getSave().options || {}).tutorialSkipped });
 
     if (this.engine && typeof this.engine.loadLevel === 'function') this.engine.loadLevel(cfg, this.clock);
     const atSec = this.clock.now() + START_LEAD_SEC;
@@ -146,6 +164,8 @@ export class LevelRuntime {
     extra.hpByTrack = this.ds.hpByTrack();
     extra.disassembledTracks = this.ds.disassembledTracks();
     this.world.sync({ clock: this.clock, instances: this.ds.activeInstances(), view: this.view }, extra);
+    // W-13：浮层吃**同一帧的同一个取样点**（beat = clock.beatAt(nowSec)），不另开第二个时间源。
+    this.overlay.sync({ clock: this.clock, beat: this.clock.beatAt(nowSec), view: this.view });
     if (this._judgmentAt && nowSec - this._judgmentAt > 0.25) this._judgment = null;
   }
 
@@ -250,11 +270,47 @@ export class LevelRuntime {
     };
     for (const code of KEYMAP.jump) bind(code, capture('jump'));
     for (const code of KEYMAP.dash) bind(code, capture('dash'));
+    for (const code of KEYMAP.skipTutorial) bind(code, () => this.skipTutorial('key'));
     bind('R', () => this.restart());
     bind('ESCAPE', () => this.togglePause());
     bind('Q', () => this.quit());
     bind('OPEN_BRACKET', () => this._nudge(-1));
     bind('CLOSE_BRACKET', () => this._nudge(1));
+  }
+
+  /**
+   * W-13 的第二条跳过通道：点浮层任意处（PRD 开篇「点击/任意键跳过教学浮层」）。
+   * 这里只读指针坐标做命中测试，**不吃玩家的动作键**：浮层期按空格仍然是一次正常跳跃。
+   * 监听照 K-05 登记进 this._offs，与键盘、事件订阅同生同灭（20 次重开不遗留）。
+   */
+  _bindPointer() {
+    const input = this.scene.input;
+    if (!input || typeof input.on !== 'function') return;
+    const onDown = (p) => {
+      if (!p || !this.overlay || !this.overlay.visible) return;
+      const x = Number(p.worldX != null ? p.worldX : p.x);
+      const y = Number(p.worldY != null ? p.worldY : p.y);
+      if (this.overlay.hitTest(x, y)) this.skipTutorial('pointer');
+    };
+    input.on('pointerdown', onDown);
+    this._offs.push(() => {
+      if (typeof input.off === 'function') input.off('pointerdown', onDown);
+    });
+  }
+
+  /**
+   * W-13：关掉教学浮层并落存档 ⇒ 下一次进第 1 关不再打扰（PRD P2「第 2 次进第 1 关的人不需要再看」）。
+   * 只写 save.options.tutorialSkipped 这一个追加字段；不碰判定、不碰音频、不碰关卡数据。
+   * @param {'key'|'pointer'|'api'} [source]
+   */
+  skipTutorial(source = 'api') {
+    if (!this.overlay.skip(source)) return false; // 本就没有浮层可关 ⇒ 不写存档，也不刷日志
+    updateSave((save) => {
+      save.options.tutorialSkipped = true;
+      return save;
+    });
+    this._log(`教学浮层已跳过（${source}），下次进第 1 关不再出现`);
+    return true;
   }
 
   /**
@@ -281,7 +337,10 @@ export class LevelRuntime {
     return judge(this.judge, action, atSec);
   }
 
-  /** 期望当前最近障碍的动作（DebugPanel / 教学提示用；不参与判定本身）。 */
+  /**
+   * 期望当前最近障碍的动作（DebugPanel / **W-13 教学浮层**用；不参与判定本身）。
+   * 浮层的「哪种障碍按哪个键」必须从这里问，不许另立一张表 —— 否则改判定会悄悄把教学变成假话。
+   */
   expectedActionFor(obstacleType) {
     return expectedAction(obstacleType);
   }
@@ -335,6 +394,7 @@ export class LevelRuntime {
     this.ds.detach();
     this.clock.stop();
     this.world.shutdown();
+    this.overlay.shutdown(); // W-13：graphics/text 容器与 world 一起释放（监听已在 _offs 里逐条摘掉）
     if (this.engine) {
       this.engine.beatClick(false);
       if (opt.disposeAudio) this.engine.dispose();

@@ -19,6 +19,7 @@
 //   render:quality      粒子/bloom 上限、审美三档候选（T16）、降级顺序
 //   render:bg           背景/视差/地面线的拍域一致性
 //   render:physics      theme ↔ physics 交叉一致（C8 不许两套口径）+ CORE selfTest 无 error
+//   render:overlay      W-13 教学浮层：按拍三步（出现/换步/退场）/ 与判定线零交集 / 可跳过并持久化 / 不改世界几何
 //   render:tierReach    W-09 Platform（模块缺失则 SKIP 并点名）
 //   render:gap          W-10 Barrage（同上）
 //   render:jumparc      W-03 Player（同上）
@@ -130,6 +131,25 @@ import {
   parallaxOffsetFor
 } from '../src/game/render/Background.js';
 import WorldLayer from '../src/game/render/WorldLayer.js';
+import OverlayLayer, {
+  BODY_LINES_MAX,
+  OVERLAY_DEPTH,
+  PANEL,
+  STEP_START_BEATS,
+  TUTORIAL_END_BEAT,
+  TUTORIAL_LEVEL_ID,
+  HEIGHT_LABEL,
+  SHAPE_LABEL,
+  buildSteps,
+  chipTextFor,
+  keyLabelsFrom,
+  panelRect,
+  stepForBeat,
+  textWidthPx
+} from '../src/game/render/OverlayLayer.js';
+import { KEYMAP } from '../src/game/scenes/LevelRuntime.js';
+import { expectedAction } from '../src/game/systems/JudgeSystem.js';
+import { SAVE_KEY, SAVE_VERSION, defaultSave, mergeSave } from '../src/data/save.js';
 import { MockClock } from '../src/mocks/MockClock.js';
 
 export const SCREENSHOT_CHECK_VERSION = 'R1.1';
@@ -1877,6 +1897,332 @@ function parseSelftestArg(arg) {
   }
 }
 
+/* ═══════════════════════════════════════════════════════════════
+ * 7z · W-13 教学浮层（render:overlay）
+ *   需求侧的数（PRD LVL-04 / §10 / §11）写死在这里，被测模块对着它们量 ——
+ *   反过来「从 OverlayLayer 读常量再断言等于自己」就是脚手架，不算断言。
+ * ═══════════════════════════════════════════════════════════════ */
+
+/** PRD LVL-04「前 8 拍分步」+ §10「3 步」：门禁侧的独立要求，不 import 被测常量 */
+const REQ_TUTORIAL_LEVEL = 1;
+const REQ_STEP_START_BEATS = [0, 2, 4];
+const REQ_TUTORIAL_END_BEAT = 8;
+/** PRD §11 L1「首次玩家 20 拍内出现首个 PERFECT」：教学必须在 20 拍这条线之前把话讲完 */
+const REQ_FIRST_PERFECT_BEAT = 20;
+
+/** 一组绘制指令的包围盒（**绘制真相**：浮层实际把笔落在了哪些像素上）。 */
+function opsBBox(ops) {
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  const eat = (xs, ys) => {
+    if (!xs.length || !ys.length) return;
+    x0 = Math.min(x0, ...xs);
+    x1 = Math.max(x1, ...xs);
+    y0 = Math.min(y0, ...ys);
+    y1 = Math.max(y1, ...ys);
+  };
+  for (const o of ops || []) {
+    if (o.op === 'fillRect' || o.op === 'strokeRect') eat([o.x, o.x + o.w], [o.y, o.y + o.h]);
+    else if (o.op === 'fillCircle') eat([o.x - o.r, o.x + o.r], [o.y - o.r, o.y + o.r]);
+    else if (o.op === 'fillPoints' || o.op === 'strokePoints') eat(o.pts.map((p) => p.x), o.pts.map((p) => p.y));
+    else if (o.op === 'line') eat([o.x1, o.x2], [o.y1, o.y2]);
+  }
+  return { x0, y0, x1, y1, n: (ops || []).length };
+}
+
+/** 抹掉所有空白：换行会把一行拆成多行，比对文案落屏时用「去空白后包含」才不会误判。 */
+function squashAll(s) {
+  return String(s).replace(/\s+/g, '');
+}
+
+function checkOverlay(baseView) {
+  const id = 'render:overlay';
+  group(id, 'W-13 教学浮层：前 8 拍三步 / 不遮挡判定线 / 可跳过且持久化');
+  const runtimeSrc = fs.readFileSync(path.join(ROOT, 'src', 'game', 'scenes', 'LevelRuntime.js'), 'utf8');
+  const overlaySrc = fs.readFileSync(path.join(ROOT, 'src', 'game', 'render', 'OverlayLayer.js'), 'utf8');
+  const keys = keyLabelsFrom(KEYMAP);
+  const steps = buildSteps({ expectedAction: (type) => expectedAction(type), keys });
+
+  /* —— ③ 三步内容：非空、互不相同、键名与真实键位一致 —— */
+  eq(id, 'PRD LVL-04：三步的起始拍 = 0/2/4 拍', STEP_START_BEATS.join(','), REQ_STEP_START_BEATS.join(','));
+  eq(id, 'PRD LVL-04：第 8 拍（含）起不再出现', TUTORIAL_END_BEAT, REQ_TUTORIAL_END_BEAT);
+  eq(id, 'PRD §10：恰好 3 步', steps.length, REQ_STEP_START_BEATS.length);
+  eq(id, 'PRD §11：教学只挂第 1 关', TUTORIAL_LEVEL_ID, REQ_TUTORIAL_LEVEL);
+  must(id, '每步都有标题与非空正文', steps.every((s) => s.head.trim().length >= 3 && s.lines.length >= 1 && s.lines.every((l) => l.trim().length >= 4)), steps.map((s) => `${s.index}:${s.head}(${s.lines.length}行)`).join(' '));
+  must(id, `每步正文 ≤ ${BODY_LINES_MAX} 行（LVL-04「文字 ≤2 行/步」）`, steps.every((s) => s.lines.length <= BODY_LINES_MAX), steps.map((s) => s.lines.length).join('/'));
+  must(id, '三步标题两两不同', new Set(steps.map((s) => s.head)).size === steps.length, steps.map((s) => s.head).join(' | '));
+  must(id, '三步正文两两不同（没有复制粘贴的占位话）', new Set(steps.map((s) => s.lines.join(''))).size === steps.length, '三步正文拼接后互不相等');
+  const allCopy = steps.map((s) => s.head + s.lines.join('')).join('') + chipTextFor(keys);
+  must(id, `文案里出现的键名 = KEYMAP 真键位（跳=${keys.jump} 冲=${keys.dash} 跳过=${keys.skip}）`, allCopy.includes(keys.jump.split('/')[0]) && allCopy.includes(keys.dash) && allCopy.includes(keys.skip), `jump「${keys.jump}」dash「${keys.dash}」skip「${keys.skip}」都在文案里`);
+  const shapeWords = Object.values(SHAPE_LABEL).map((v) => v.shape);
+  const heightWords = Object.values(HEIGHT_LABEL);
+  must(id, '第 3 步按形状点名要按什么（不是「请注意」这种虚话）', steps[2].lines.join('').includes(shapeWords[0]) && steps[2].lines.join('').includes(shapeWords[2]) && steps[2].lines.join('').includes(keys.jump), steps[2].lines.join(' / '));
+  const blind = buildSteps({ keys });
+  must(id, '没注入 expectedAction ⇒ 不谎报形状归属（宁可少说）', blind[2].actionsKnown === false && !blind[2].lines.join('').includes(shapeWords[0]), `退化成「${blind[2].lines.join(' / ')}」`);
+  const inverted = buildSteps({ expectedAction: () => 'dash', keys });
+  const invCopy = inverted[2].lines.join('');
+  must(id, '反证：文案跟随注入的动作表而变 ⇒ 映射只有一份真相（JudgeSystem）',
+    invCopy.includes(`${shapeWords[2]}要${'冲'}`) && !shapeWords.some((w) => invCopy.includes(`${w}要跳`)),
+    `把 expectedAction 换成恒 dash 的假函数后：${inverted[2].lines.join(' / ')}`);
+  must(id, '浮层源码里没有第二张动作表（ACTION_BY_TYPE / barrage:dash 之类）', !/ACTION_BY_TYPE|barrage\s*:\s*.?dash/.test(overlaySrc), '形状归属只能从 expectedAction 问出来');
+
+  /* —— DEF-06：颜色词不得作唯一判别线索（教学通道必须走已证可辨的冗余通道）—— */
+  must(id, 'DEF-06 文案不把颜色词与形状名绑在一起（「红三角」这类写法为 0 处）',
+    !steps.some((s) => /[红黄粉蓝绿橙紫青](三角|横条|六边形)/.test(s.head + s.lines.join(''))),
+    steps.map((s) => s.head).join(' | '));
+  const decol = steps.map((s) => (s.head + s.lines.join('')).replace(/[红黄粉蓝绿橙紫青]/g, ''));
+  must(id, 'DEF-06 抹掉全部颜色词后，第 ① 步仍能认出声部（形状 + 高度两条已证通道都在）',
+    shapeWords.every((w) => decol[0].includes(w)) && heightWords.every((w) => decol[0].includes(w)),
+    `① 去色后=「${decol[0]}」，需含 ${shapeWords.join('/')} + ${heightWords.join('/')}`);
+  must(id, 'DEF-06 抹掉全部颜色词后，第 ③ 步仍能指认每个声部该按什么',
+    shapeWords.filter((w) => decol[2].includes(w)).length >= 2 && /[跳冲]/.test(decol[2]),
+    `③ 去色后=「${decol[2]}」`);
+  must(id, 'DEF-06 去色后三步仍两两不同（颜色不是区分步骤的暗道）', new Set(decol).size === decol.length, decol.map((s) => s.slice(0, 12)).join(' | '));
+  must(id, '高度词与可达性包络一致（贴地=ground / 半空=jump-band / 头顶=dash-only）', (() => {
+    const env = trackEnvelope(baseView);
+    // 注意：断言的是**各自的可达性模式**，不是 bass 与 synth 的 y 排序——
+    // 实测 worldYFor(bass, pitchTier=2)=334.8 比 worldYFor(synth)=383.4 更高，
+    // 高档横条确实会盖到网的上方，所以「谁更靠上」不成立，「贴地/跳跃带/只需冲的净空」才成立。
+    return env.kick.mode === 'ground' && HEIGHT_LABEL.spike === '贴地'
+      && env.bass.mode === 'jump-band' && HEIGHT_LABEL.platform === '半空'
+      && env.synth.mode === 'dash-only' && HEIGHT_LABEL.barrage === '头顶'
+      && env.synth.clearancePx >= baseView.sizes.player.h
+      && env.kick.y === baseView.groundY;
+  })(), `modes ${trackEnvelope(baseView).kick.mode}/${trackEnvelope(baseView).bass.mode}/${trackEnvelope(baseView).synth.mode}，synth 净空 ${fmt(trackEnvelope(baseView).synth.clearancePx, 1)}px ≥ 身高 ${fmt(baseView.sizes.player.h, 1)}px`);
+
+  /* —— ① 显隐时刻按拍算（纯函数 + 真时钟两种口径） —— */
+  const table = [-1, -0.0004, 0, 0.5, 1.9, 1.9999, 2, 3.4, 3.9999, 4, 6, 7.9, 7.9999, 8, 9, 120];
+  const mapped = table.map((b) => {
+    const s = stepForBeat(b);
+    return `${b}→${s == null ? 'off' : s.index}`;
+  });
+  must(id, '拍→步 与 PRD 分步表一致（窗内 3 段、窗外 null）', mapped.join(' ') === '-1→0 -0.0004→0 0→0 0.5→0 1.9→0 1.9999→0 2→1 3.4→1 3.9999→1 4→2 6→2 7.9→2 7.9999→2 8→off 9→off 120→off', mapped.join(' '));
+  must(id, '拍→步 是纯函数（同拍同问 100 次全等）', (() => {
+    for (let i = 0; i < 100; i += 1) {
+      const a = stepForBeat(4.2);
+      const b = stepForBeat(4.2);
+      if (!a || !b || a.index !== b.index || a.startBeat !== b.startBeat) return false;
+    }
+    return true;
+  })(), '100 次重复调用逐字段相等（无内部状态、无累积）');
+  must(id, 'NaN/undefined 拍 ⇒ 不显示（不拿脏值蒙进步骤）', stepForBeat(NaN) === null && stepForBeat(undefined) === null, 'stepForBeat(NaN)=null');
+
+  const clk = clockAt(120);
+  const ovHost = makeHost();
+  const ov = new OverlayLayer({ levelId: 1, expectedAction: (t) => expectedAction(t), keymap: KEYMAP });
+  ov.init(ovHost, baseView);
+  const marks = [];
+  let lastKey = null;
+  for (let f = 0; f <= 1320; f += 1) {
+    const t = f / 120; // 1/120s 一步，0..11s = 0..22 拍 @120BPM
+    const s = ov.sync({ clock: t, view: baseView });
+    const key = s.visible ? `step${s.stepIndex}` : 'off';
+    if (key !== lastKey) {
+      marks.push({ key, t, beat: clk.beatAt(t) });
+      lastKey = key;
+    }
+  }
+  const at = (key) => marks.find((m) => m.key === key);
+  must(id, '真时钟推进下的转换序列 = 出现→换步→换步→消失', marks.map((m) => m.key).join(',') === 'step0,step1,step2,off', marks.map((m) => `${m.key}@${fmt(m.beat, 3)}拍`).join(' '));
+  const beatTol = 0.02;
+  for (const [key, want] of [['step0', 0], ['step1', REQ_STEP_START_BEATS[1]], ['step2', REQ_STEP_START_BEATS[2]], ['off', REQ_TUTORIAL_END_BEAT]]) {
+    const m = at(key);
+    must(id, `${key} 的触发拍 = ${want}（±${beatTol} 拍）`, !!m && Math.abs(m.beat - want) <= beatTol, m ? `实测 ${fmt(m.beat, 4)} 拍（t=${fmt(m.t, 4)}s）` : '从未出现该转换');
+  }
+  must(id, '消失是「到 8 拍」而不是「过了 N 秒」', !!at('off') && Math.abs(at('off').t - REQ_TUTORIAL_END_BEAT * clk.beatLengthSec(0)) <= beatTol * clk.beatLengthSec(0), `off 在 t=${fmt(at('off') ? at('off').t : -1, 4)}s，8 拍 @120BPM = ${fmt(REQ_TUTORIAL_END_BEAT * clk.beatLengthSec(0), 4)}s`);
+  const fast = clockAt(150);
+  const fv = viewWithClock(BASE.w, BASE.h, fast, fast.beatLengthSec(0));
+  const ovFastHost = makeHost();
+  const ovFast = new OverlayLayer({ levelId: 1, expectedAction: (t) => expectedAction(t), keymap: KEYMAP });
+  ovFast.init(ovFastHost, fv);
+  const fastOff = (() => {
+    for (let f = 0; f <= 1320; f += 1) {
+      const t = f / 120;
+      const s = ovFast.sync({ clock: t, view: fv });
+      if (!s.visible && f > 0) return t;
+    }
+    return null;
+  })();
+  must(id, '变速不改分步：150BPM 下同样在第 8 拍退场（按拍不按秒）', fastOff != null && Math.abs(fastOff - 8 * fast.beatLengthSec(0)) < 0.02, `150BPM：退场 t=${fmt(fastOff, 4)}s = ${fmt((fastOff || 0) / fast.beatLengthSec(0), 3)} 拍（120BPM 时是 4.0s）`);
+  fast.stop();
+  clk.stop();
+
+  /* —— ② 几何：与判定线 / 可读窗 / HUD 带 / 时间轴带零交集，且装得下自己的文字 —— */
+  for (const vp of VIEWPORTS) {
+    const v = buildView(vp.w, vp.h, {});
+    const wid = `${vp.w}x${vp.h}`;
+    let worstGap = Infinity;
+    let allFit = true;
+    let minFont = Infinity;
+    let maxRowW = 0;
+    let maxLines = 0;
+    for (let i = 0; i < steps.length; i += 1) {
+      const r = panelRect(v, { index: i }, { steps });
+      allFit = allFit && r.fits;
+      minFont = Math.min(minFont, r.bodyPx, r.headPx);
+      maxLines = Math.max(maxLines, r.bodyLines);
+      for (const row of r.headRows.concat(r.bodyRows, r.chipRows)) {
+        const wPx = textWidthPx(row, r.bodyPx);
+        maxRowW = Math.max(maxRowW, wPx);
+        worstGap = Math.min(worstGap, r.maxPx - wPx);
+      }
+      must(id, `${wid}·第${i + 1}步整块面板在 4 拍可读窗右侧（判定线盖不到）`, r.x0 >= r.spawnX && r.spawnX === Math.round(v.rightSpawnX), `x0=${r.x0} ≥ 出生线=${r.spawnX}（判定线 x=${fmt(v.judgeX, 1)}，间距 ${fmt(r.x0 - v.judgeX, 1)}px = ${fmt((r.x0 - v.judgeX) / v.pxPerBeat, 2)} 拍）`);
+      must(id, `${wid}·第${i + 1}步不压 HUD 带也不压时间轴带`, r.y0 >= v.zones.worldTop && r.y1 <= v.zones.worldBottom, `y ${r.y0}..${r.y1} ⊂ 世界带 ${fmt(v.zones.hudHeight, 1)}..${fmt(v.zones.worldBottom, 1)}`);
+    }
+    must(id, `${wid}·面板高度在世界带内（文字不溢出框）`, allFit, '三步的 contentH ≤ 世界带净高');
+    must(id, `${wid}·字号 ≥ ${FONT_MIN_PX}px（PERF-05 最小可读）`, minFont >= FONT_MIN_PX, `正文/标题最小 ${minFont}px`);
+    must(id, `${wid}·每行估宽 ≤ 换行上限（留 ${Math.round((PANEL.widthSafety - 1) * 100)}% 字体回退余量）`, worstGap > 0, `最宽行 ${fmt(maxRowW, 1)}px，距上限还有 ${fmt(worstGap, 1)}px`);
+    must(id, `${wid}·正文行数不超 ${BODY_LINES_MAX} 行`, maxLines <= BODY_LINES_MAX, `最多 ${maxLines} 个逻辑行`);
+    must(id, `${wid}·面板整体落在画布内`, panelRect(v, { index: 0 }, { steps }).x1 <= v.width && panelRect(v, { index: 0 }, { steps }).y0 >= 0, `x1=${panelRect(v, { index: 0 }, { steps }).x1} ≤ ${v.width}`);
+  }
+
+  /* —— 绘制真相：从假 Graphics 的指令包围盒反查（不是模块自述） —— */
+  const v1080 = buildView(BASE.w, BASE.h, {});
+  const truthHost = makeHost();
+  const truth = new OverlayLayer({ levelId: 1, expectedAction: (t) => expectedAction(t), keymap: KEYMAP });
+  truth.init(truthHost, v1080);
+  for (let i = 0; i < steps.length; i += 1) {
+    truth.sync({ clock: clk.timeAtBeat ? clk.timeAtBeat(0) : 0, beat: REQ_STEP_START_BEATS[i], view: v1080 });
+    const box = opsBBox(truthHost.list[0].ops);
+    must(id, `第${i + 1}步：所有绘制指令都在出生线右侧`, truth.visible && box.x0 >= Math.round(v1080.rightSpawnX), `${box.n} 条 op，最小 x=${fmt(box.x0, 1)} ≥ 出生线 ${fmt(v1080.rightSpawnX, 1)}（判定线在 ${fmt(v1080.judgeX, 1)}）`);
+    must(id, `第${i + 1}步：绘制包围盒不越出世界带`, box.y0 >= v1080.zones.worldTop && box.y1 <= v1080.zones.worldBottom, `y ${fmt(box.y0, 1)}..${fmt(box.y1, 1)} ⊂ ${fmt(v1080.zones.worldTop, 1)}..${fmt(v1080.zones.worldBottom, 1)}`);
+    const visTexts = truthHost.texts.filter((t) => t.visible);
+    must(id, `第${i + 1}步：文本对象也全在出生线右侧`, visTexts.length >= 3 && visTexts.every((t) => t.x >= Math.round(v1080.rightSpawnX)), `${visTexts.length} 个可见文本，最小 x=${fmt(Math.min(...visTexts.map((t) => t.x)), 1)}`);
+    const onscreen = squashAll(visTexts.map((x) => x.text).join(''));
+    must(id, `第${i + 1}步：屏幕上的文本就是该步文案（标题 + 至少一行正文）`, onscreen.includes(squashAll(steps[i].head)) && steps[i].lines.some((l) => onscreen.includes(squashAll(l))), onscreen);
+  }
+  must(id, '浮层只用自己的那一个 Graphics 容器（不借 WorldLayer 的层）', truthHost.list.length === 1 && truthHost.list[0].depth === OVERLAY_DEPTH, `${truthHost.list.length} 个容器，depth=${truthHost.list[0].depth}（WorldLayer 占 0..4）`);
+  must(id, '浮层压在最上（否则教学会被障碍/演出盖住）', OVERLAY_DEPTH > 4, `depth ${OVERLAY_DEPTH} > WorldLayer 的 4`);
+  truth.shutdown();
+  must(id, 'shutdown 释放容器（K-05 不遗留）', truthHost.list.every((g) => g.destroyed) && truthHost.texts.every((t) => t.destroyed) && truth.ready === false, `${truthHost.list.length} graphics + ${truthHost.texts.length} text 全部 destroyed`);
+
+  /* —— ④ 跳过开关 —— */
+  const skipHost = makeHost();
+  const sk = new OverlayLayer({ levelId: 1, expectedAction: (t) => expectedAction(t), keymap: KEYMAP });
+  sk.init(skipHost, baseView);
+  sk.sync({ clock: clk.timeAtBeat(3), view: baseView });
+  must(id, '跳过前：第 3 拍浮层在（对照，证明 skip 真的改变了东西）', sk.visible === true && sk.snapshot().stepIndex === 1, `visible=${sk.visible} step=${sk.snapshot().stepIndex}`);
+  eq(id, 'skip() 返回 true（确实关掉了东西）', sk.skip('key'), true);
+  must(id, 'skip() 之后窗口内每个采样点都不再出现', [0, 1, 2, 3, 4, 6, 7.9].every((b) => {
+    sk.sync({ clock: clk.timeAtBeat(b), view: baseView });
+    return sk.visible === false;
+  }), '采样拍 0/1/2/3/4/6/7.9 全部 invisible');
+  eq(id, 'skip() 幂等（第二次按不动状态机，也不重复落盘）', sk.skip('key'), false);
+  const hide = sk.transitions.filter((t) => t.type === 'hide');
+  must(id, 'skip() 记一次 hide，原因写来源（key/pointer），不许冒充自然退场', hide.length === 1 && hide[0].reason === 'key' && hide[0].type === 'hide', JSON.stringify(hide));
+  const natural = ov.transitions.filter((t) => t.type === 'hide');
+  must(id, '自然退场（到 8 拍）记 window-end，与跳过两条路可区分', natural.length === 1 && natural[0].reason === 'window-end' && Math.abs(natural[0].beat - REQ_TUTORIAL_END_BEAT) <= beatTol, JSON.stringify(natural));
+  must(id, '转换流水只记「第几拍」不记秒（T4：拍是唯一时间来源）', ov.transitions.every((t) => Number.isFinite(t.beat) && typeof t.sec === 'undefined' && typeof t.timeSec === 'undefined' && typeof t.ms === 'undefined'), JSON.stringify(ov.transitions.map((t) => `${t.type}@${fmt(t.beat, 2)}`)));
+  sk.beginRun({ levelId: 1, skipped: false });
+  sk.sync({ clock: clk.timeAtBeat(0.5), view: baseView });
+  must(id, '重开（R）后 skipped=false ⇒ 浮层回到第 1 步（T6：本局态不跨局泄漏）', sk.visible === true && sk.snapshot().stepIndex === 0, `visible=${sk.visible} step=${sk.snapshot().stepIndex} transitions=${sk.transitions.length}`);
+  sk.beginRun({ levelId: 1, skipped: true });
+  const persistedHidden = [0, 1, 2, 4, 6, 7.9].every((b) => {
+    sk.sync({ clock: clk.timeAtBeat(b), view: baseView });
+    return sk.visible === false;
+  });
+  must(id, '存档说「已跳过」⇒ 第一次进关的 8 拍里一帧都不出现（PRD P2 不打扰第 2 次）', persistedHidden && sk.transitions.length === 0, `transitions=${JSON.stringify(sk.transitions)} eligible=${sk.eligible()}`);
+  sk.beginRun({ levelId: 2, skipped: false });
+  const otherLevelHidden = [0, 1, 2, 4, 6, 7.9, 12].every((b) => {
+    sk.sync({ clock: clk.timeAtBeat(b), view: baseView });
+    return sk.visible === false && sk.eligible() === false;
+  });
+  must(id, '第 2 关及以后永不出教学（只有 L1）', otherLevelHidden, 'levelId=2 ⇒ eligible=false');
+  const sk3 = new OverlayLayer({ levelId: 1, expectedAction: (t) => expectedAction(t), keymap: KEYMAP });
+  const hitHost = makeHost();
+  sk3.init(hitHost, baseView);
+  sk3.sync({ clock: clk.timeAtBeat(5), view: baseView });
+  const hitR = sk3.snapshot().rect;
+  must(id, '点面板任意处 = 跳过（鼠标通道）', sk3.hitTest((hitR.x0 + hitR.x1) / 2, (hitR.y0 + hitR.y1) / 2) === true, `面板 x ${hitR.x0}..${hitR.x1} y ${hitR.y0}..${hitR.y1}，中心点命中`);
+  must(id, '点判定线 / HUD 文字 / 时间轴都不算跳过（误点不毁教学）', sk3.hitTest(baseView.judgeX, baseView.groundY) === false && sk3.hitTest(48, 24) === false && sk3.hitTest(48, baseView.height - 44) === false && sk3.hitTest(baseView.width / 2, baseView.zones.timelineTop + 10) === false, '判定线、(48,24)、左下日志行、时间轴带四处的 hitTest 全 false');
+  sk.shutdown();
+  sk3.shutdown();
+
+  /* —— 存档字段：加性、老档兼容、版本不动 —— */
+  const sv = defaultSave();
+  eq(id, '默认档 options.tutorialSkipped = false（新人第一次要教）', sv.options.tutorialSkipped, false);
+  eq(id, '老档（没这个字段）补 false ⇒ 读取不抛错（SAV-03）', mergeSave({ options: { strictWindow: true } }).options.tutorialSkipped, false);
+  eq(id, '已跳过的档读回来仍是 true ⇒ 跨会话持久', mergeSave({ options: { tutorialSkipped: true } }).options.tutorialSkipped, true);
+  eq(id, '加性字段不 bump schema（T5：version 仍是 1）', mergeSave({ version: SAVE_VERSION, options: { tutorialSkipped: true } }).version, 1);
+  eq(id, '没有新增存储键（还是那一个键）', SAVE_KEY, 'rhythm-breaker/save');
+
+  /* —— CORE 侧接线：只允许这一条时间来源，且不复用动作键 —— */
+  const startBodyOf = (() => {
+    const i = runtimeSrc.indexOf('  start() {');
+    let depth = 0;
+    let started = false;
+    for (let j = runtimeSrc.indexOf('{', i); j < runtimeSrc.length; j += 1) {
+      if (runtimeSrc[j] === '{') {
+        depth += 1;
+        started = true;
+      }
+      if (runtimeSrc[j] === '}') depth -= 1;
+      if (started && depth === 0) return runtimeSrc.slice(i, j + 1);
+    }
+    return '';
+  })();
+  must(id, '接线：起关/重开同一条 start() 里 beginRun（教学态随本局重置，T6）', startBodyOf.includes('this.overlay.beginRun('), startBodyOf ? 'start() 体内含 beginRun' : 'start() 方法体没找到');
+  must(id, '接线：sync 的拍来自 clock.beatAt(nowSec)（不是 scene.time / 挂钟）', /this\.overlay\.sync\(\{[^}]*beat:[^}]*clock\.beatAt\(nowSec\)[^}]*\}\)/.test(runtimeSrc), '帧序里复用同一个 nowSec 取样点');
+  must(id, '接线：OverlayLayer 的 expectedAction 由注入给出（浮层不自建动作表）', /new OverlayLayer\(\{[\s\S]{0,240}expectedAction:[\s\S]{0,80}expectedActionFor/.test(runtimeSrc), '构造点把 expectedActionFor 递进去');
+  must(id, '接线：跳过键 = KEYMAP.skipTutorial，且与 jump/dash 键无交集（教学期按空格仍是正常跳）', Array.isArray(KEYMAP.skipTutorial) && KEYMAP.skipTutorial.length > 0 && KEYMAP.skipTutorial.every((c) => !KEYMAP.jump.includes(c) && !KEYMAP.dash.includes(c)), `skip=${KEYMAP.skipTutorial.join('/')} jump=${KEYMAP.jump.join('/')} dash=${KEYMAP.dash.join('/')}`);
+  must(id, '接线：跳过即落盘 options.tutorialSkipped（唯一写入口）', runtimeSrc.includes('save.options.tutorialSkipped = true'), 'LevelRuntime.skipTutorial 里 updateSave');
+  must(id, '接线：shutdown() 里释放浮层（K-05 全释放）', runtimeSrc.includes('this.overlay.shutdown()'), '与 world.shutdown() 同一段');
+  must(id, '浮层是纯呈现层：源码不认识判定/存档/音频（不产生事件、不进分母）', !/\bds\b|\bjudge\b|engine|updateSave|localStorage|onJudgment/.test(overlaySrc), 'OverlayLayer.js 里 0 处 ds/judge/engine/save 标识符');
+
+  /* —— ⑤ 静帧：浮层不改障碍几何（同帧两次 WorldLayer 快照逐字段全等） —— */
+  const wHost = makeHost();
+  const wl = new WorldLayer();
+  wl.init(wHost, baseView);
+  const probe2 = [inst('kick', 10), inst('bass', 10.5), inst('synth', 11), inst('kick', 12)];
+  const tFrame = clk.timeAtBeat(5);
+  const pickItems = (s) => JSON.stringify((s.items || []).map((it) => [it.id, it.track, it.x, it.y, it.beatsToJudge, it.state]));
+  wl.sync({ clock: tFrame, instances: probe2, view: baseView }, {});
+  const geoBefore = pickItems(wl.snapshot(tFrame));
+  const opsBefore = wHost.list.map((g) => g.ops.length);
+  const wrappedBefore = wl.wraps.size;
+  const stateBefore = probe2.map((i) => i.state).join(',');
+  const quietHost = makeHost();
+  const quiet = new OverlayLayer({ levelId: 1, expectedAction: (t) => expectedAction(t), keymap: KEYMAP });
+  quiet.init(quietHost, baseView);
+  quiet.sync({ clock: tFrame, view: baseView });
+  wl.sync({ clock: tFrame, instances: probe2, view: baseView }, {});
+  const geoAfter = pickItems(wl.snapshot(tFrame));
+  must(id, '浮层在 / 不在：障碍几何与状态逐字段全等（纯呈现，不参与世界）', geoBefore === geoAfter && wl.wraps.size === wrappedBefore && probe2.map((i) => i.state).join(',') === stateBefore, `items ${probe2.length} 条 x/y/beatsToJudge/state 全等；wraps ${wrappedBefore}→${wl.wraps.size}`);
+  must(id, '浮层没往 WorldLayer 的四个容器里画一笔', wHost.list.every((g, i) => g.ops.length === opsBefore[i]), `上层各容器 op 数 ${opsBefore.join('/')} 不变`);
+  must(id, '浮层自己确实画了东西（不是靠「不画」冒充不干扰）', quietHost.list[0].ops.length >= 4 && quietHost.texts.filter((t) => t.visible).length >= 3, `浮层本帧 ${quietHost.list[0].ops.length} 条 op / ${quietHost.texts.filter((t) => t.visible).length} 个可见文本`);
+  quiet.shutdown();
+  wl.shutdown();
+
+  /* —— 🚩「20 拍内首次 PERFECT」的机器侧代理：拿真 L1 谱面量教学窗盖不盖住第一件要按的东西 —— */
+  const pg = optional.get('patternGenerator');
+  const l1File = path.join(ROOT, 'src', 'data', 'levels', 'level1.json');
+  if (!pg || !fs.existsSync(l1File)) {
+    skip(id, 'L1 真谱面：教学窗盖住首个核心障碍', pg ? 'level1.json 未交付' : 'PatternGenerator.build 未交付（SOUND）');
+  } else {
+    const cfg1 = JSON.parse(fs.readFileSync(l1File, 'utf8'));
+    const c1 = clockAt(Number(cfg1.bpm) || 110, cfg1.tempoChanges || []);
+    c1.init({ bpm: cfg1.bpm, sections: cfg1.sections, tempoChanges: cfg1.tempoChanges, introBeats: cfg1.introBeats, lengthBeats: cfg1.lengthBeats });
+    c1.start(0);
+    const list = pg.build(cfg1, c1).filter((o) => o.judgable !== false);
+    const core = list.filter((o) => o.core !== false);
+    const firstAny = list.length ? Math.min(...list.map((o) => o.beat)) : Infinity;
+    const firstCore = core.length ? Math.min(...core.map((o) => o.beat)) : Infinity;
+    must(id, 'L1 首个可判障碍落在教学窗内（[0,8) 拍 ⇒ 玩家按的时候第 3 步还在屏上）', firstAny < TUTORIAL_END_BEAT, `首个可判 beat=${fmt(firstAny, 2)}，核心 beat=${fmt(firstCore, 2)}，窗口 [0,${TUTORIAL_END_BEAT})`);
+    must(id, '第 3 步（讲哪个键按哪个障碍）上线不晚于首个核心障碍', STEP_START_BEATS[STEP_START_BEATS.length - 1] <= firstCore, `第 3 步 @${STEP_START_BEATS[2]} 拍 ≤ 首个核心桩 @${fmt(firstCore, 2)} 拍`);
+    must(id, '整个教学窗（含消失拍）压在 20 拍这条人类验收线之内', TUTORIAL_END_BEAT <= REQ_FIRST_PERFECT_BEAT && firstCore <= REQ_FIRST_PERFECT_BEAT, `窗口结束 ${TUTORIAL_END_BEAT} 拍、首个 PERFECT 机会 ${fmt(firstCore, 2)} 拍，均 ≤ ${REQ_FIRST_PERFECT_BEAT} 拍`);
+    c1.stop();
+  }
+
+  const r0 = panelRect(v1080, { index: 0 }, { steps });
+  headline.overlay = `3步@${STEP_START_BEATS.join('/')}拍·${TUTORIAL_END_BEAT}拍退场·x0=${r0.x0}≥出生线${fmt(v1080.rightSpawnX, 0)}（判定线间距${fmt(r0.x0 - v1080.judgeX, 0)}px）·跳过持久化`;
+  ovHost.list.forEach((g) => g.destroy());
+  ov.shutdown();
+  ovFast.shutdown();
+  return true;
+}
+
 function runSelftest(groupId, payload) {
   const w = payload.world;
   const t = payload.timeline;
@@ -1997,6 +2343,8 @@ export async function run(opts = {}) {
   mark('fx same-frame');
   checkGhostLayer(view, clock);
   mark('ghost layer');
+  checkOverlay(view);
+  mark('tutorial overlay');
 
   {
     const id = 'render:selftest';
@@ -2030,6 +2378,7 @@ export async function run(opts = {}) {
     `CSS ${headline.cssTokens}`,
     headline.zones ? `分区 ${headline.zones}` : '',
     headline.quality,
+    headline.overlay ? `教学浮层 ${headline.overlay}` : '教学浮层未检查',
     `${counts.pass}通过/${counts.fail}失败/${counts.skip}SKIP`
   ]
     .filter(Boolean)
