@@ -443,3 +443,43 @@ R8 的推送结论不变：`github.com` 的 `CONNECT` 仍被代理拒（407）�
 **R11 补 · CR-16 / W-18**：`pixels[]` 的生产侧我没有自己填，因为采样口径的三个分歧（采样点、背景参照、聚合方式）
 会改变 L-08「灰度可辨」的含义，而绘制真相归 WORLD。已开 CR-16 并把卡挂到 D8（W-18），
 `render:selftest` 在口径定死之前继续如实记 SKIP，不用理论值冒充实测值刷绿。
+
+## R12 · 两个 agent 撞轮次上限，leader 收尾并把初版推上公共站（2026-11-23）
+
+**事实先记清楚**：W-13（教学浮层）与 K-14（校准 + ui 声）两个 agent 都在 **150 轮上限**被截断，
+最后一条消息分别是「Now writing the overlay module」和「Now let me fix several structural problems
+in the panel（duplicate data-role、fake-DOM 不支持的 removeAttribute、残留 60/bpm）」。
+它们停在**手还没收**的状态：`render:overlay` 当时 543 通过 / 2 失败。
+这一轮不再重派 agent（27M/25M token、34 分钟、且仍可能撞上限），由 leader 直接把 2 条红断言修到绿。
+
+**顺手补上 K-19 缺的那半件事**：`tools/playtestReport.mjs`（导出侧一直有，读回侧没有人写）。
+它把 T22 四路归因写成显式阈值判据，并**逐关**做窗口反事实。`--selftest` 13/13 PASS。
+这个自测第一次跑就抓出两个真 bug，都在我自己的代码里：
+- `^lv?(\d+)-…` 的语义是「l 必需、v 可选」，SOUND 现行的 `2-kick-8` 一个都不匹配（CR-17）
+  → `laneKeyOf` 把跨关泳道并成 `x-kick`；③④ 两路归因假阴性。两处正则改 `(?:lv)?`。
+- judge 事件只有绝对秒 `t`、没有 `beat`，④「变速附近」根本没有口径（CR-18）
+  → 工具改为报 `⚠无口径` 而不是报「没问题」，并要求 CORE 按 T5 补字段（卡 K-22）。
+
+**DEF-06 结案（CR-19）**：教学第 ① 步不再教「红=鼓 黄=贝斯 粉=合成器」——门禁自己有一条
+**反证**断言钉着「红/粉裸灰度差 16 < 门限 40」，教它等于对设计目标人群没教。
+`SHAPE_LABEL` 拆 `{shape,hue}`，文案改走形状 + 可达性模式：`三角贴地 · 横条半空 · 六边形头顶`。
+门禁净增 5 条断言（543+2 → 550/0/1SKIP，一条未删）：颜色词与形状名拼写 0 处、
+抹掉全部颜色词后第 ①③ 步仍能认出声部、去色后三步仍两两不同、高度词与 `trackEnvelope().mode` 对撞。
+最后这条先把**我自己的想法**打红了：`worldYFor('bass', pitchTier=2)=334.8` 比 `worldYFor('synth')=383.4`
+更靠上，所以「谁比谁高」不成立，可成立的口径只有可达性模式——按 mode 重钉。
+
+**同时修掉的第二个真问题**：`STEP_EPS_BEAT = 1e-3` 拍同时用在 `start - eps` 与 `end - eps`，
+结果第 2、3 步各**提前最多 0.1 拍**翻出（@120BPM ≈58ms，判定窗的一半）。它本意只是吃掉
+1e-7 量级的积分残差，容差给宽了 4 个数量级。改 `1e-6` 拍后拍表与门禁一致。
+
+**验收状态**：`verify:all -> 5/5 PASS, 0 SKIP, 0 FAIL`；`node --check` 全绿；
+`npx eslint` 对改动文件无输出；提交前扫 staged diff 无凭据。
+推送 `5e88fde..7faf15b` 走 `ssh://git@ssh.github.com:443/`（HTTPS 直连仍被网络拦）。
+
+**独立审查（另一个 agent 做 reviewer，只读）留下的账**，已登记不代改：
+K-20 静音/主音量为 0 时校准仍把点击记成「已听」并把垃圾中位数写盘；
+K-21 面板可用性是构造时快照（`UiLayer.js:143`），状态变了不重算；
+K-22 = CR-18；K-23 JDG-09 原文是 8 拍取中位数，实现丢 2 个 warmup 后取 6 个，注释还把这件事说成原文规定。
+reviewer 也确认了**确实做对的**：T4 无实时 API 混进判定路径（`clock.now()` + `timeAtBeat` 自造实例）、
+校准中位数不是写了没人读（`judge.setLatency` → `JudgeSystem.js:336 inputSec = t − latency/1000` 真消费）、
+`save.js` 只增 `options.tutorialSkipped` 且老档不炸、5 屏按钮 ui 声都接通。
