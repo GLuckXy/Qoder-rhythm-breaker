@@ -1,0 +1,17 @@
+file:///E:/Xiang/Qoder/workplace/%E9%AB%98%E6%A0%A1/Qoder-rhythm-breaker/.agent/e2e/browserE2E.mjs:309
+const endgame = await ev('(()=>{const c=window.__CORE__;const n=c.clock.now();return {clockState:c.clock.state?c.clock.state():null,running:!!c.clock._running,loopId:c.clock._loopId===null?'null':typeof c.clock._loopId,now:+n.toFixed(2),origin:+(c.clock.originSec?c.clock.originSec():NaN).toFixed(2),beat:Number(c.clock.beatAt(n).toFixed?c.clock.beatAt(n).toFixed(2):c.clock.beatAt(n)),lengthBeats:c.levelCfg?c.levelCfg.lengthBeats:(c.cfg?c.cfg.lengthBeats:null),dsState:c.ds.state(),runtimeRunning:(c.runtime?!!c.runtime.running:null),pending:c.judge.pendingCount(),ticks:c.clock._tickCount===undefined?null:c.clock._tickCount}})()');
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+SyntaxError: missing ) after argument list
+    at compileSourceTextModule (node:internal/modules/esm/utils:318:16)
+    at ModuleLoader.moduleStrategy (node:internal/modules/esm/translators:90:18)
+    at #translate (node:internal/modules/esm/loader:435:20)
+    at afterLoad (node:internal/modules/esm/loader:491:29)
+    at ModuleLoader.loadAndTranslate (node:internal/modules/esm/loader:496:12)
+    at #getOrCreateModuleJobAfterResolve (node:internal/modules/esm/loader:549:36)
+    at afterResolve (node:internal/modules/esm/loader:597:52)
+    at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:603:12)
+    at node:internal/modules/esm/loader:622:32
+    at TracingChannel.tracePromise (node:diagnostics_channel:362:14)
+
+Node.js v24.16.0

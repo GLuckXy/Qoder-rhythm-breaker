@@ -96,7 +96,7 @@ export class LevelScene extends Phaser.Scene {
         `L${this.cfg.id} 结算 · 评级 ${stats.rank}`,
         `Perfect ${(stats.perfectRate * 100).toFixed(1)}%（${stats.perfect}/${stats.total}）`,
         `核心命中 ${(stats.coreHitRate * 100).toFixed(0)}% · 最高连击 ${stats.maxCombo} · MISS ${stats.miss}`,
-        stats.disassembled ? '全声部已拆解 → 寂静' : '未拆完（分母不变）',
+        stats.disassembled ? '全声部已拆解 → 寂静' : '未拆完（分母 = 本局可判事件）',
         '',
         'R 重开 · Q 回标题'
       ].join('\n')

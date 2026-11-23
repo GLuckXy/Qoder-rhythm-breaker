@@ -101,8 +101,6 @@ export class LevelRuntime {
     this.judge.setWindowScale(Number(cfg.windowScale) || 1);
     this.ds.load(cfg, { instances: this._instances });
     this.ds.bindJudge(this.judge);
-    this.ds.attach();
-    this.judge.registerObstacles(this._instances);
     this._extra = {};
     this._judgment = null;
     this.finished = false;
@@ -111,6 +109,12 @@ export class LevelRuntime {
     const atSec = this.clock.now() + START_LEAD_SEC;
     this.clock.start(atSec);
     this.startedAtSec = atSec;
+    // DEF-03（浏览器实测：游戏永远走不到结算屏）：`BeatClock.start()` 会清空派发队列，
+    // 而 `ds.attach()` 正是用 `clock.schedule(_finalize, timeAtBeat(lengthBeats))` 注册「关卡终点」。
+    // 所以**一切向时钟注册事项的 attach 必须发生在 start 之后**——顺序换回来，收口那一发才打得出去。
+    // CR-11 的「arm 必须在 clock.start 之后」继续成立。
+    this.ds.attach();
+    this.judge.registerObstacles(this._instances);
     // CR-11 批复：arm() 必须在 clock.start(atSec) **之后**
     if (this.engine && typeof this.engine.arm === 'function') this.engine.arm(atSec);
     this.running = true;
@@ -176,7 +180,7 @@ export class LevelRuntime {
   _onDisassemble(p) {
     if (this.engine) this.engine.silence(p.track); // C6 的唯一静音出口（0.1s 线性斜坡）
     this.world.markTrackDisassembled(p.track);
-    this.judge.registerObstacles(this.ds.activeInstances()); // 停止生成：该类 pending 实例摘队
+    this.judge.syncObstacles(this.ds.activeInstances()); // 停止生成：该类 pending 实例摘队（不改写终态，见 R5 MISS 风暴）
     this._log(`拆解 ${p.track} @ beat ${p.beat == null ? '?' : p.beat.toFixed(1)}`);
   }
 
@@ -185,7 +189,7 @@ export class LevelRuntime {
     // SFX_TRIGGERS 里 'revive' 标注「调用点直发」（C7 无此事件：hp 单调不增），不是 grade 映射，不违反 CR-12。
     if (this.engine && typeof this.engine.playSfx === 'function') this.engine.playSfx('revive');
     this._extra.revivedIds = (this._extra.revivedIds || []).concat(p.ids || []);
-    this.judge.registerObstacles(this.ds.activeInstances()); // 当前拍之后恢复生成（不补发历史）
+    this.judge.syncObstacles(this.ds.activeInstances()); // 当前拍之后恢复生成（不补发历史、不重开别人的队列）
     this._log(`复活 ${p.track} → hp ${p.hp}，新下发 ${p.ids.length} 个实例`);
   }
 

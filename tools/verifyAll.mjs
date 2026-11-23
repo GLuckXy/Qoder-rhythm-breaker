@@ -10,7 +10,9 @@ const checks = [
   ['contract', 'tools/contractTest.mjs'],
   ['level', 'tools/checkLevel.mjs'],
   ['audio', 'tools/audioAssert.mjs'],
-  ['render', 'tools/screenshotCheck.mjs']
+  ['render', 'tools/screenshotCheck.mjs'],
+  // DEF-03：起关顺序错了的时候四道门禁全绿、游戏却永远走不到结算屏，故单列第五道（leader 名下）
+  ['order', 'tools/orderCheck.mjs']
 ];
 
 const only = process.argv.slice(2).filter((a) => !a.startsWith('--'));

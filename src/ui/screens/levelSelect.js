@@ -46,7 +46,7 @@ export function buildSelect(data = {}, deps = {}) {
   );
   if (!levels.length) grid.appendChild(caption('尚无谱面（SOUND 名下 level*.json 未就位）'));
 
-  return panel(col([headline('选关', 'rb-text-title rb-glow-system'), grid, row([back]), caption('徽章 = 已把该关全部声部拆解；Perfect 率口径 = PERFECT 数 / 本关可判定障碍总数（不含背景层）')], { style: 'gap:.9em' }), { role: 'select' });
+  return panel(col([headline('选关', 'rb-text-title rb-glow-system'), grid, row([back]), caption('徽章 = 已把该关全部声部拆解；Perfect 率口径 = PERFECT 数 / 本局可判事件数（初始谱面 + 复活补发，不含背景层）')], { style: 'gap:.9em' }), { role: 'select' });
 }
 
 export default buildSelect;

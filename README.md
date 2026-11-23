@@ -136,6 +136,13 @@ npm run verify:all       # 依次跑上面四道 + lint，任一红即退出码�
    绘制真相归 WORLD，CORE 不猜数；`screenshotCheck` 那一组目前按 SKIP 处理。
 7. **`npm run build` 依赖 WORLD 名下的 `src/game/objects/Timeline.js` 能解析**——`?selftest=render` 的负载按
    `world-selftest/v1` 契约必须带 `timeline` 快照，所以该文件进了浏览器图。WORLD 编辑期间的语法抖动会连带卡构建。
+8. **浏览器实跑目前只覆盖 L1 一条完整路径**（无头 Edge + CDP 可信按键，从起跑到结算）。它抓出了 Node 侧 601 条断言
+   测不到的一整类缺陷：拆解/复活把实例摘队后旧超时定时器仍在补发 MISS、`registerObstacles` 的重开语义被热路径复用
+   导致已判实例拉回 pending 反复重判（`MISS` 实测冲到 149903）。修法与口径已固化成 `contractTest` 的 `misstorm` case
+   （一局 60s 仿真到底 `MISS ≤ 可判对象数`、队列内 id 不重复），但 **L2–L6 的浏览器全流程仍未实跑过**，
+   同一类问题是否在多声部/变速关卡里以别的形态出现，尚待逐关验证。
+9. **favicon 走内联 data-URI SVG**（`index.html`），不新增素材文件；这同时消掉了 `/favicon.ico` 的两条 404，
+   「console 零报错」这条验收线目前只在 L1 路径上核过。
 8. **音效里 `revive` / `ui` 两个是「调用点直发」**（SOUND 的 `SFX_TRIGGERS` 明确登记 C7 事件流里没有这两类）。
    `revive` 已接在 `LevelRuntime._onRevive`；**界面按钮的 `ui` 声尚未接线**（不影响判定与音乐）。
 9. **无浏览器自动化**：`check:render` 的像素级结论与「五界面点得动」这类事实，目前只能靠人工打开一次页面回贴 JSON。

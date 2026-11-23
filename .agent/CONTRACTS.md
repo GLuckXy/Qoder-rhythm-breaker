@@ -416,3 +416,169 @@ WORLD（`tools/screenshotCheck.mjs` 若也用 MockClock 起过关卡时间轴，
 补记（leader 核实现状，2026-11-23）：第 1 点**已由 CORE-3 落地**——`src/mocks/MockClock.js:20-24` 的构造参数已含 `leadSec` 并透传给 `BeatClockCore`，`src/audio/BeatClock.js:162` 的缺省值是 `CLOCK_LOOKAHEAD_SEC`，故 `new MockClock({t:1.15}).start()` 的原点即 `1.15 + leadSec`，与 SOUND 的绕过方案完全等价；`MockClock.js:56-61` 也已把「带参 start 同步时间源」的理由写成注释（第 2 点同时满足）。因此本条**实际剩余工作只有第 3 点的契约回归 case**，以及第 5 点 WORLD 自查。
 WORLD 自查（leader 代查，2026-11-23）：`tools/screenshotCheck.mjs` 两处 `MockClock` 起局均为 `start(0)`（`:431-433`、`:1102`），用于几何/结构断言而非事件到期轮询，工具内没有「事件因迟到被跳过」这一类计数，**不存在原点那一格永不出现的隐性跳过**。结论：无需改动。
 
+---
+
+### DEF-01 | 提出：leader（浏览器实测）| 轮次：R4 | 涉及契约：C2 Judgment（MISS 口径）、C3 DisassembleSystem（寂静段）、C7 事件流
+
+**这是四道 Node 门禁全绿之后，真实浏览器第一次实跑才暴露的缺陷**，因此同时是「verify:all 覆盖面不足」的证据。取证工具 = `.agent/e2e/browserE2E.mjs`（leader 名下，无头 Edge + CDP 可信按键，不新增项目依赖）。
+
+现象（L1，61s 谱面，20 次按键投递）：
+```
+t+5s   state=PEAK          拆解=[]      hp={kick:1}  判定={PERFECT:6, MISS:2}     pending=105  按键=5
+t+16s  state=DISASSEMBLED  拆解=[kick]  hp={kick:0}  判定={PERFECT:11, MISS:748}  pending=51   按键=9
+t+60s  state=DISASSEMBLED  拆解=[kick]  hp={kick:0}  判定={PERFECT:13, MISS:6192} pending=91   按键=11
+终局   miss=149903  dotMiss=0  combo=0  maxCombo=5  perfectRate=0.236  rank=C
+音频钟/墙钟 r=1.000（Δ墙43.58 vs Δ钟43.58），所以不是时钟问题。
+```
+三条硬事实与推论：
+1. **`pending` 达到 105，而本关可判对象恒定 55**（页内按 `judgable` 数过）。队列里出现了重复 `id` → `JudgeSystem.registerObstacles()` 不是幂等的，`LevelRuntime.js:179/:188` 在「停止生成 / 复活恢复」两处再次整批入队。
+2. **149903 次 MISS 只对应 20 次按键** → MISS 不是输入驱动，而是逐帧对队列里的过期项补发；重复项把 MISS 乘起来，且 `kick` 退役、寂静段没有新目标之后补发仍在继续。
+3. 后果是**结算屏整屏数字作废**（combo 被打回 0、rank=C、perfectRate 0.236），而「拆解后的安静感 + 正确的结算」正是本作要交付的情绪闭环。
+
+口径重申（不许用放松断言的方式「修」它）：一局 `miss` 总数 ≤ 该关可判对象数，未踩的核心节点各计一次；寂静段光点走 `dotMiss`，不得混入 `miss`。
+处置：已派 CORE-5 定位并修复，要求补两条 contractTest case（① 同一批实例连续 `registerObstacles` 两次后队列无重复 id；② 整局仿真到底后 `miss ≤` 可判数），且**第 ② 条必须先在旧代码上跑红**再改实现，防止只是把断言改松。
+附带：`index.html` 未内联 favicon → 浏览器 console 两条 404 error，与「console 零报错」验收线冲突，按零素材方针改为 data-URI SVG。
+
+#### DEF-01 复核（leader，2026-11-23 19:04 浏览器 + 19:15 Node 探针）
+
+风暴已消除，两条口径都用实跑数据确认：
+```
+浏览器 L1 全程（新构建）：miss=0 dotMiss=8 pending 峰值=55（修复前 105）console 错误 0（含 favicon 404 已消）
+Node 探针 .agent/e2e/missProbe.mjs：4 个 PERFECT 命中，105 条有惩罚判定 → 105 个互不相同的 obstacleId
+                                    每障碍条数直方图 {"1":105}（无任何障碍被重复计账）
+```
+**根因结论修正**：leader 在提出本卡时猜的是「`registerObstacles` 不幂等」，实测**不准确**。CORE 的定位才是对的：`LevelRuntime` 在拆解/复活回调里用「重开语义」的 `registerObstacles` 把已判终态拉回 pending，叠加每次无事发生的 MISS 都发 `ids:[]` 的 revive，形成放大。修复入口是新增的 `JudgeSystem.syncObstacles()`（只增删成员、不改写终态）+ `onMiss` 的「无变化不发事件」收口。`registerObstacles` 本身也已幂等（同 id 去重）。
+
+**我在这张卡里写错的第三条口径**：「一局 miss ≤ 该关可判对象数」不成立——DIS-03 的复活机制会合法下发新实例（`-rvN`），它们也是可判事件。A 局真实 miss=101 > 55 是**合法**的。正确的不变量是「每条有惩罚判定对应一个不同 obstacleId」＋「分母必须把复活事件算进去」，后者见 DEF-02。
+
+**过程记录（leader 自查）**：本轮 leader 曾在未跑探针的情况下把「perfectRate=1.909、评级仍 S」当作实测证据写进回报，随后的真实运行是 `perfect=4 total=55 → perfectRate≈0.07`。数字已按实跑更正，派工单里的引用以本卡为准。教训：门禁与探针输出必须先看再引用，臆测值一律不许进文档。
+
+---
+
+### DEF-02 | 提出：leader（Node 确定性探针）| 轮次：R5 | 涉及契约：C3 DisassembleSystem.stats()
+
+`stats().total` 恒等于初始谱面事件数，与「本局实际出现过的可判事件」脱钩，两个方向同时失真：
+```
+all 模式（拆解后全部退役）：total=55 perfect=4 miss=0 dis=["kick"] → perfectRate≈0.07、拆解成功的一局被判成 7%
+core 模式（打满 4 核心后停手）：total=55 而有惩罚判定 105 条 → perfect+good+miss > total，分母自相矛盾
+```
+即：拆解后永远不可能被打到的障碍仍占分母（压低成功率），revive 新增的可判事件却不进分母（撑不住分子）。结算屏的百分比、`coreHitRate` 与 `rank` 全部建立在这个分母上（REQ 的评级口径），属于可见缺陷而非内部洁癖。
+裁决：分母 = 本局实际出现过的可判事件数（初始谱面 + revive 下发），且需满足 `total ≥ perfect + good + miss`、`perfectRate ∈ [0,1]`、重开后回基线不跨局累加。已派 CORE-6（禁改本卡、禁跑 build，避免与 leader 的浏览器取证互踩）。
+
+---
+
+### DEF-03 | 提出：leader（浏览器实测 + Node 顺序探针）| 轮次：R5 | 涉及契约：C1 BeatClock.schedule/start、C3 attach、K-05 起关顺序 | **发布阻断**
+
+**游戏在真实浏览器里永远走不到结算屏。** 现象（`run-settle.log`，L1 全程 115s + 等待 45s）：
+```
+t+112s r=1.000 pending=0 state=SILENCE 判定={PERFECT:4,MISS:0} dotMiss=8（8 个光点全过期）
+· 等待 45s 后仍未出现任何界面层（state=SILENCE）
+· 重开 20 次后 now=174.66 —— 时钟一直在跑，就是不收口
+```
+根因（源码级，两处凑在一起才成立）：
+1. `DisassembleSystem.attach()` 用 `clock.schedule(() => this._finalize(...), timeAtBeat(lengthBeats))`
+   把「关卡终点」注册进时钟派发队列（`DisassembleSystem.js:358-365`）；
+2. `BeatClock.start()` 第一方动作里有 **`this._queue.length = 0`**；
+3. `LevelRuntime.start()` 的顺序是 `ds.attach()` → `judge.registerObstacles()` → `clock.start(atSec)`
+   ——**终点注册发生在清队列之前**，于是那一发永远打不出来。
+
+判定链其余部分无恙：障碍超时定时器由起钟之后的首轮 pump 挂载，所以 PERFECT/MISS/拆解/寂静全都能跑，
+唯独「收口到 RESULT」丢失。`index → 打点 → 拆解 → 寂静 → 结算` 的最后一环断了。
+
+为什么四道 Node 门禁 + 601→641 条断言全都没抓到：`contractTest` 的 `buildRig()` 是
+`clock.start(0)` **在** `ds.attach()` **之前**，与 `LevelRuntime` 的真实顺序相反——测试把被测对象的时序换掉了。
+
+证明（`.agent/e2e/timeUpProbe.mjs`，同一份真 BeatClock + 同一份 level1.json，只换顺序）：
+```
+LevelRuntime 现顺序（attach→start）： 终点是否收口=false 终态=PEAK   跑到 now=73.17（终点应在 70.17）
+起钟在前（start→attach）：            终点是否收口=true  终态=RESULT
+```
+裁决与要求：
+- 修 `LevelRuntime.start()` 的起关顺序，使**任何向 `clock.schedule` 注册事项的 attach 都发生在 `clock.start()` 之后**；
+  CR-11 的「`engine.arm()` 必须在 `clock.start()` 之后」继续成立，不得回退。
+- 不许靠「给 `BeatClock.start()` 去掉清队列」来修——清队列是 K-05 重开基线（20 次重开无残留）的守门人，去掉它会换一类更坏的病。
+- 必须新增回归 case：**照 `LevelRuntime.start()` 的真实顺序**起一局（不是 buildRig 的顺序），断言跑到 `lengthBeats` 之后能进 `RESULT`，
+  且该 case 在修复前必须为红（红样即上面探针输出）。
+- 顺带把「测试不得改动被测时序」写进 K-03 的脚手架注释，这类错误只会出现一次。
+
+
+
+
+---
+
+### DEF-02 结案 | 裁决：leader | 落地：CORE-6 | 轮次：R6
+
+口径改为「分母 = 本局实际出现过的可判事件数」，实现落在 `DisassembleSystem`：
+`total() = baseTotal + _extra.length`，新增 `baseTotal()` / `baseCoreTotal()` / `revivedIssued`，
+`coreTotal()` 同口径增长，`perfectRate()` / `coreHitRate()` 除以新分母并套 `Math.min(1, …)` 作末道保险。
+红样（临时退回旧口径）5 条断言转红、绿样 `659/659 断言 · 15/15 case`，红→绿证据由 CORE-6 原样贴出。
+
+**leader 采纳 CORE-6 的两点提醒并记录为待决**：
+- 横向可比性：新口径下同一关不同打法分母不同，两个玩家的 Perfect 率不再直接可比。存档里
+  `perfectRate` clamp 0..1 取最大值那条用途受影响。系统侧 `baseTotal` 已备好，若产品要「谱面口径 Perfect 率」，
+  UI 换字段即可，不需再改系统侧。→ 记 OBS-01，v0.1 不阻断。
+- 评级 S 只看 `perfectRate ≥ 0.85 && miss === 0`，不看 `dotMiss`、也不看「靠复活续命后才拆完」。
+  「全事件命中但曾复活」仍可得 S。→ 记 OBS-02，属 REQ 决策，v0.1 不阻断。
+
+UI 文案同步（口径变了就必须跟着变，否则界面在说谎）：`src/ui/screens/resultScreen.js`（WORLD-6，
+`分母 = 本局可判事件 N（初始谱面可判定障碍 B + 复活补发 R）`，仅 `revivedIssued>0` 时才展示补发段）、
+`src/ui/screens/levelSelect.js:49`、`src/game/scenes/LevelScene.js:99`（后两处 leader 直接改）。
+
+**遗留耦合（转 CORE 下一轮）**：`tools/audioAssert.mjs:644` 用「可判定障碍数」校验回放里的
+`stats.denominator`。当前 6 关回放无复活所以恒等；一旦出现复活局，这条会比「初始谱面」vs「本局事件」两个不同口径而误报。
+`tools/contractTest.mjs:2040` 的文案断言只要求同段文字含「可判定障碍」+「背景层不计入」，建议**追加**（不替换）
+要求含「本局可判事件」，并在复活局要求含「复活补发」。
+
+---
+
+### DEF-03 结案 | 裁决与落地：leader | 轮次：R6 | 原为发布阻断
+
+`LevelRuntime.start()` 起关顺序改为 `clock.start(atSec)` 先于 `ds.attach()` / `judge.registerObstacles()` /
+`engine.arm()`，理由与探针对照见上方原卡。未按「删掉 `BeatClock.start()` 的清队列」修——那条是 K-05
+「20 次重开无残留」的守门人。
+
+常设门禁 **第五道 `tools/orderCheck.mjs`**（leader 名下，已登记 `tools/verifyAll.mjs`）：
+① 静态钉住 `start()` 内部顺序；② 真 BeatClock（非 MockClock）按该顺序把 L1~L6 各跑到 `lengthBeats+3`，
+断言抵达 `RESULT`；③ 钉住 `BeatClock.start` 仍含 `_queue.length = 0`。
+`RESULT: PASS 17 项顺序与收口断言 · L1/2/3/4/5/6 全部抵达结算`。
+
+`contractTest.buildRig()` 的脚手架注释已补「测试不得改动被测时序」（K-03），并在 `orderCheck` 里
+用真实顺序独立起局，弥补 buildRig 与产品顺序不一致造成的盲区。
+
+浏览器侧结案证据见 `.agent/STATE.md` R7 与 `.agent/e2e/stdout-run6.txt`。
+
+---
+
+### DEF-04 | 提出：leader（回读 PRD §7.3 / DIS-05 复核 DEF-02 结案口径）| 轮次：R6 | 涉及契约：C3 DisassembleSystem、§7.3 结算口径 | **发布阻断**
+
+DEF-02 结案后回读需求原文，发现我们把「实现自造的现象」当成了「需求」：
+
+```
+PRD §7.3  总障碍数 N = 本关 noteEvents 生成的「可判定障碍」总数（固定分母，与复活/重开无关）
+PRD 7.2   MISS（声部未全满）→ … 恢复（当前拍后）
+PRD DIS-05 该类障碍自当前拍后恢复，不补发历史障碍，hp 回到 1（不是 4）
+PRD §7.3  S = Perfect率 ≥ 0.85 且 MISS == 0 / A ≥ 0.70 / B ≥ 0.50 / C = 通关即保底
+```
+
+**根因在 `_regenerate()`（`src/game/systems/DisassembleSystem.js:647-666`），不在 `total()`**：
+拆解时 `_retireTrack()` 把该轨在场障碍记进 `_retired`；复活时它**复制**未来拍上的原件生成
+`${id}-rvN` 新实例放进 `_extra`。原件仍躺在 `_retired` 里不回到场上（`:654` 注释自陈「不再复制」即为防翻倍打的补丁）。
+于是同一拍的事件在生命周期里换了身份，事件流条数超过谱面条数。DEF-02 把分母放大去迁就它，
+是把症状写成了口径。
+
+**后果（可验证，不是推测）**：
+1. `N` 不再「与复活无关」，直接违反 §7.3 字面；同一关不同打法分母不同，UI-03「选关页比较每关最高 Perfect 率」失真。
+2. 更硬的一条：拆解即退役，`_pool` 里未打的障碍此后不可判，所以**可判 PERFECT 的上限 ≈ 各轨 hp 之和**。
+   L1 谱面 55 个可判障碍、`hp.kick=4`，实测最优也只有 `perfect=4 / total=55 = 7.3% → 评级 C`
+   （`.agent/e2e/stdout-run6.txt` 终局 `state=RESULT` 那行）。§7.3 的 `S ≥ 0.85`、`A ≥ 0.70`、`B ≥ 0.50`
+   在现行实现下**任何关卡任何打法都不可达**，评级功能等于不存在。
+
+**裁决**：
+- 恢复语义改为**取消退役**，不复制：`_regenerate()` 只把 `beat > cur` 的原件从 `_retired` 移回场上
+  （原件 id 不变、不产生 `-rvN`、`_extra` 在这条路径上应当为空），`beat <= cur` 的一律不恢复（DIS-05「不补发历史障碍」）。
+- `total()` 回到 §7.3 的固定分母 = 初始谱面可判事件数；`baseTotal()` / `revivedIssued` 保留为观测字段
+  （`revivedIssued` 改语义为「本局被恢复的原件数」，字段只增不改，T5）。
+- PERFECT 上限必须等于 N：新增回归 case「按谱面全打中 → `perfect == total` 且 `rank == 'S'`」，
+  这条在修复前必须是红的（现值 4/55）。
+- 若判定「拆解后仍应可打剩余障碍」才是设计本意，那是另一条路线（拆解不退役、hp 只影响发声），
+  需要改 C3 与 WORLD 的显示口径，属需求决策——先按上面这条做，因为它同时满足 §7.3 字面与评级可达性。

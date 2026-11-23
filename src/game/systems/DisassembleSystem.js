@@ -12,7 +12,9 @@
 //      HUD / ReplayAssembler 一律用 `penalizes` 字段过滤，不许再各写一份「算不算 MISS」。
 //   2) 分流判据唯一化：只看 `judgable` 布尔，**禁止**用 `track==='bed'` / `type==='bed'` 猜；
 //      `tracks.bed` 一律忽略（读 `disassemble:false`，不猜 `hp===0`）。
-//   3) 分母 = 本关 build() 出的可判定障碍总数，固定；复活、重开、跳过都不改它（§7.3 / DIS-05）。
+//   3) 分母 = **本局实际出现过的可判定事件数** = 初始谱面 + 复活补发的新实例（R6 修订，旧 §7.3「固定分母」
+//      在复活局里会把 perfectRate 顶到 1.9）；重开（reset）回初始谱面基线，不跨局累加。
+//      初始谱面单独存为 `_denominator`（对外 `baseTotal()`），内容校验仍用它。
 
 import { BeatClock } from '../../audio/BeatClock.js';
 import { FROZEN } from '../../data/physics.js';
@@ -114,13 +116,20 @@ export class DisassembleSystemCore {
       this._disassembleBeat[t] = null;
     }
     if (Array.isArray(opts.instances)) this.setInstances(opts.instances);
+    else {
+      // 换了关卡配置却没带实例表：本局分母的增量（复活补发）必须一起归零，
+      // 否则 total() 会带着上一关的 -rvN 实例进场（跨关累加，K-05 的漂移同类缺陷）。
+      this._retired.clear();
+      this._extra = [];
+      for (const t of DIS_TRACKS) this._seq[t] = 0;
+    }
     this.dots = this._buildDots();
     this._state = 'INTRO';
     return this;
   }
 
   /**
-   * C4 实例表（build() 的输出，可含 bed）。**分母在这里定死**。
+   * C4 实例表（build() 的输出，可含 bed）。**初始谱面分母在这里定死**。
    * 判据唯一：`judgable === false` 的一律不是玩家对象（CR-09 批复）。
    */
   setInstances(instances) {
@@ -134,7 +143,7 @@ export class DisassembleSystemCore {
     return this;
   }
 
-  /** 本局重开（R）：hp / 计数 / 队列回基线，**分母不变**（§7.3 T6 用例）。 */
+  /** 本局重开（R）：hp / 计数 / 队列回基线，分母回到**初始谱面**（_extra 清空，不跨局累加，§7.3 T6）。 */
   reset() {
     for (const t of DIS_TRACKS) {
       this._hp[t] = this._hpMax[t];
@@ -195,13 +204,25 @@ export class DisassembleSystemCore {
     return this._freeOrder;
   }
 
-  /** §7.3 的固定分母。 */
+  /**
+   * §7.3 + R6 口径修订：分母 = **本局实际出现过的可判定事件数** =
+   * 初始谱面（`_pool`）+ 复活补发的新实例（`_extra`，DIS-05 的 `-rvN`）。
+   * 只数初始谱面会让 `perfect / total` 在有复活的局里冲到 1.9（R6 leader Node 仿真实测），
+   * 结算屏直接印出 190.9% 的 Perfect 率并把评级奖励成 S。
+   * `_extra` 在 reset()/setInstances() 里清空，所以重开基线自动回到初始谱面（K-05，不跨局累加）。
+   */
   total() {
+    return this._denominator + this._extra.length;
+  }
+
+  /** 初始谱面的可判定事件数（DebugPanel / 内容校验用；不随复活变化）。 */
+  baseTotal() {
     return this._denominator;
   }
 
+  /** 核心事件数：同样把复活补发的核心节点算进分母（与 total() 同口径）。 */
   coreTotal() {
-    return this._coreTotal;
+    return this._coreTotal + this._extra.reduce((n, o) => n + (o.core === true ? 1 : 0), 0);
   }
 
   /**
@@ -269,12 +290,18 @@ export class DisassembleSystemCore {
     const minHp = Math.min(...live.map((t) => this._hp[t]));
     const pick = REVIVE_PRIORITY.find((t) => this._hp[t] === minHp);
     if (!pick) return null;
-    if (this._hp[pick] !== REVIVE_HP) {
+    // DIS-03/05 的收口：一次 MISS 只有在**真的改变了什么**（hp 被抬起、或确有被拆解摘掉的未来事件要补发）
+    // 时才发 hp-change / revive 事件。否则它只清连击+起无敌帧——与上面「全 hp=4 不改音频」同一条口径。
+    // 不这样收口时，每次 MISS 都发一次 ids:[] 的 revive，LevelRuntime 会因此重跑队列登记，
+    // 已被 registerObstacles 拉回 pending 的旧障碍再次超时 MISS，形成 MISS 指数放大（R5 浏览器实测）。
+    const hpChanged = this._hp[pick] !== REVIVE_HP;
+    if (hpChanged) {
       this._hp[pick] = REVIVE_HP;
       this._hpWrittenBy = 'onMiss';
       this._emit('hp-change', { track: pick, hp: REVIVE_HP, reason: 'revive' }, atSec);
     }
     const ids = this._regenerate(pick, atSec);
+    if (!hpChanged && !ids.length) return pick; // 无事发生：不发 revive、不迁移状态（WORLD/SOUND/判定队列都不动）
     this._emit('revive', { track: pick, hp: REVIVE_HP, ids, from: 'revive' }, atSec);
     if (this._state === 'DISASSEMBLED') {
       // DIS-08 的回退边：这就是「世界重建」事件（WORLD 收到 state-change reason:'revive' + revive ids）
@@ -532,14 +559,21 @@ export class DisassembleSystemCore {
     return { ...this._n, combo: this.combo, maxCombo: this.maxCombo };
   }
 
-  /** §7.3：Perfect 率 = PERFECT 数 / 固定分母（不含 bed、不随复活与重开变化）。 */
+  /**
+   * §7.3：Perfect 率 = PERFECT 数 / **本局出现过的可判定事件数**（`total()`，含复活补发）。
+   * 分子永远不可能超过「出现过的事件数」（一个事件最多一条有惩罚判定，JDG-05/R5 收口），
+   * 所以值域天然落在 [0,1]；`Math.min(1, …)` 只是最后一道保险：即便上游又出重复计账，
+   * 结算屏也不会印出 190.9% 这种数字（重复计账本身由 contractTest 的 dupIds / 每障碍最多 1 条守住）。
+   */
   perfectRate() {
-    return this._denominator > 0 ? this._n.perfect / this._denominator : 0;
+    const d = this.total();
+    return d > 0 ? Math.min(1, this._n.perfect / d) : 0;
   }
 
-  /** PRD §14 建议的第二项：核心命中率（不进 Perfect 率口径，仅结算展示）。 */
+  /** PRD §14 建议的第二项：核心命中率（不进 Perfect 率口径，仅结算展示）。分母与 total() 同口径。 */
   coreHitRate() {
-    return this._coreTotal > 0 ? this._n.corePerfect / this._coreTotal : 0;
+    const d = this.coreTotal();
+    return d > 0 ? Math.min(1, this._n.corePerfect / d) : 0;
   }
 
   rank() {
@@ -554,8 +588,13 @@ export class DisassembleSystemCore {
   stats() {
     return {
       state: this._state,
-      total: this._denominator,
-      coreTotal: this._coreTotal,
+      total: this.total(),
+      coreTotal: this.coreTotal(),
+      /** R6 补字段（只增不改）：初始谱面口径，不随复活变化，供 DebugPanel / 内容校验对照。 */
+      baseTotal: this._denominator,
+      baseCoreTotal: this._coreTotal,
+      /** R6 补字段：本局复活补发的新实例数（= 分母相对初始谱面的增量）。 */
+      revivedIssued: this._extra.length,
       ...this.counts(),
       perfect: this._n.perfect,
       perfectRate: this.perfectRate(),
@@ -595,9 +634,15 @@ export class DisassembleSystemCore {
 
   /**
    * 复活后重新下发该类障碍：只取 **当前拍之后** 且**因拆解被摘掉**的原始事件，复制成新 id 实例
-   * （state:'revived'），不补发历史（DIS-05）。新实例进 _extra，因此分母与 _pool 长度都不变。
+   * （state:'revived'），不补发历史（DIS-05）。新实例进 _extra：**本局分母 total() = 初始谱面 + _extra 随之上长**
+   * （R6 口径，否则复活局的 perfectRate 会超过 1），而初始谱面 _denominator 与 _pool 长度不变。
    * 只复制 `_retired` 里的项：hp>0 的声部从未被摘掉，它的未来障碍仍在原实例里，再复制一份就会
    * 让同一拍出现两个可判定实例（JDG-08 的「同拍只消费 1 次」会吞掉第二个 → 玩家白丢一个障碍）。
+   *
+   * R5 收口（浏览器实测 MISS 风暴的第二根因）：**一个原始事件在 activeInstances() 里最多占一个名额**。
+   *   · 该事件已经有一份副本（在场或已终态）→ 不再补第二份，也不把原件放回场上（原件继续 `_retired`，
+   *     由副本代表它）；否则原件 + 副本同时可判定，同一拍出现两个对象，pending 从 55 涨到 105，
+   *     MISS 与寂静段的过期补发一起翻倍。
    */
   _regenerate(track, atSec) {
     const cur = this._clock.beatAt(atSec);
@@ -606,6 +651,7 @@ export class DisassembleSystemCore {
       if (o.track !== track) continue;
       if (!this._retired.has(o.id)) continue;
       if (!(o.beat > cur + 1e-9)) continue;
+      if (this._extra.some((x) => x.sourceId === o.id)) continue; // 已有一份代表它，不再复制
       this._seq[track] += 1;
       const copy = {
         ...o,
@@ -616,7 +662,6 @@ export class DisassembleSystemCore {
         sourceId: o.id
       };
       this._extra.push(copy);
-      this._retired.delete(o.id);
       ids.push(copy.id);
     }
     return ids;

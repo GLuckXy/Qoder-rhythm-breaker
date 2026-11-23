@@ -1155,6 +1155,9 @@ function readLevel(id) {
  * @returns {object|null} rig
  */
 function buildRig(PG, MC, JS, DS, cfg, opt = {}) {
+  // K-03 硬约束：本脚手架**不得改动被测时序**。DEF-03 就是这么漏掉的——这里 `clock.start()` 在 attach 之前，
+  // 而当时的 `LevelRuntime.start()` 是 attach 在前，`BeatClock.start()` 会清 `_queue`，终点 schedule 被抹掉，
+  // 641 条断言全绿也照不出「游戏永远进不了结算」。凡是「顺序相关」的性质，去 tools/orderCheck.mjs 用真实顺序验证。
   const clock = new MC.MockClock({ t: 0 });
   clock.init({
     bpm: cfg.bpm,
@@ -1361,7 +1364,11 @@ async function caseReviveTie() {
   eq('revive-tie: 复活新实例数 = 当前拍之后的原始事件数', revived.length, 5);
   ok('revive-tie: 复活实例的 beat 全部 > 当前拍（不补发历史，DIS-05）', revived.every((o) => o.beat > beatNow), JSON.stringify(revived.map((o) => o.beat)));
   ok('revive-tie: 复活实例 id 带 -rvN 后缀且与源 id 不同', revived.every((o) => /-rv\d+$/.test(o.id) && o.sourceId !== o.id));
-  eq('revive-tie: 复活不改分母', ds.total(), 24);
+  // R6 口径修订：分母 = 本局实际出现过的可判定事件数。复活补发的新实例是玩家真能打的对象，
+  // 不进分母就会让 perfectRate 倒挂（leader Node 仿真实测 1.909）。初始谱面单独由 baseTotal() 守住。
+  eq('misstorm/revive-tie: 复活把补发实例算进分母（total = 初始谱面 + 复活数）', ds.total(), 24 + revived.length);
+  eq('revive-tie: 初始谱面分母不随复活变化（baseTotal，bed 仍不计入）', ds.baseTotal(), 24);
+  eq('revive-tie: 核心分母与 total 同口径增长（coreTotal = 24 + 复活核心数）', ds.coreTotal(), 24 + revived.length);
   eq('revive-tie: 复活后实例 id 全表唯一（不出现同拍双实例）', new Set(ds.activeInstances().map((o) => o.id)).size, ds.activeInstances().length);
   eq('revive-tie: 复活后 hp = REVIVE_HP', ds.hp('synth'), DS.REVIVE_HP);
   eq('revive-tie: hp-change 事件的 reason 标注 revive', reviveEvents.length > 0 && hpEvents.some((p) => p.reason === 'revive'), true);
@@ -2074,12 +2081,332 @@ async function caseScreens() {
 }
 
 /* ------------------------------------------------------------------ */
+/* case: misstorm — R5 浏览器实测的 MISS 风暴（重复入队 / 终态被重开语义拉回 pending）*/
+/* ------------------------------------------------------------------ */
+
+/**
+ * 与 LevelRuntime 完全同构的接线：ds 的 'disassemble' / 'revive' 事件都回到判定队列做一次重同步。
+ * 旧代码只有 registerObstacles（重开语义：把 judged/expired 拉回 pending），所以这里用特性探测：
+ * 没有 syncObstacles 时退回 registerObstacles —— 那正是浏览器里跑的那份实现，用来让本 case 变红。
+ */
+function wireRuntimeResync(rig, probe) {
+  const resync = () => {
+    probe.resyncs += 1;
+    const list = rig.ds.activeInstances();
+    const q = (typeof rig.judge.syncObstacles === 'function' ? rig.judge.syncObstacles(list) : rig.judge.registerObstacles(list)) || [];
+    probe.maxQueue = Math.max(probe.maxQueue, q.length);
+    if (new Set(q.map((o) => o.id)).size !== q.length) probe.dupIds += 1;
+    probe.maxPending = Math.max(probe.maxPending, rig.judge.pendingCount());
+  };
+  rig.ds.on('disassemble', resync);
+  rig.ds.on('revive', resync);
+  return resync;
+}
+
+/** 一关 60 秒完整仿真：按「只打前 N 个核心节点」的策略打，其余全程不打，一直跑到 RESULT。 */
+function simRun(PG, MC, JS, DS, cfg, { coreHits = 0, otherHits = 0 } = {}) {
+  const rig = buildRig(PG, MC, JS, DS, cfg);
+  const probe = { resyncs: 0, maxQueue: 0, maxPending: 0, dupIds: 0 };
+  wireRuntimeResync(rig, probe);
+  probe.maxQueue = rig.judge.pendingList().length;
+  probe.maxPending = rig.judge.pendingCount();
+  const live = rig.instances.filter((o) => o.judgable !== false).sort((a, b) => a.timeSec - b.timeSec);
+  const step = 0.025; // 与 BeatClock 的轮询同粒度（CLOCK_POLL_MS）
+  const end = rig.clock.timeAtBeat(Number(cfg.lengthBeats) || 0) + 1.5;
+  let ptr = 0;
+  let doneCore = 0;
+  let doneOther = 0;
+  while (rig.clock.time() < end) {
+    rig.clock.advanceBy(step);
+    while (ptr < live.length && live[ptr].timeSec <= rig.clock.time() + 0.001) {
+      const o = live[ptr];
+      const want = o.core ? doneCore < coreHits : doneOther < otherHits;
+      if (want) {
+        if (o.core) doneCore += 1;
+        else doneOther += 1;
+        rig.judge.onInput(JS.expectedAction(o.type), o.timeSec);
+      }
+      ptr += 1;
+    }
+    probe.maxPending = Math.max(probe.maxPending, rig.judge.pendingCount());
+    if (rig.ds.state() === 'RESULT') break;
+  }
+  const penalized = rig.feed.filter((j) => j.penalizes !== false && j.rule !== 'emptyBeat');
+  rig.ds.detach();
+  return { rig, probe, penalized, judgable: live.length };
+}
+
+async function caseMissStorm() {
+  const MC = await load('src/mocks/MockClock.js', 'misstorm');
+  const JS = await load('src/game/systems/JudgeSystem.js', 'misstorm');
+  const DS = await load('src/game/systems/DisassembleSystem.js', 'misstorm');
+  const PG = await load('src/game/systems/PatternGenerator.js', 'misstorm');
+  if (!MC || !JS || !DS || !PG) return;
+  const cfg1 = readLevel(1);
+  if (!cfg1) {
+    skipCase('misstorm', 'src/data/levels/level1.json 尚不存在（SOUND 名下内容）');
+    return;
+  }
+  const judgableOf = (cfg) => PG.build(cfg, new MC.MockClock({ t: 0 })).filter((o) => o.judgable !== false).length;
+  eq('misstorm: L1 可判对象数与页内诊断一致（55）', judgableOf(cfg1), 55);
+
+  /* —— ① 入队幂等：连续两次登记同一批实例，队列不重不复位 —— */
+  {
+    const rig = buildRig(PG, MC, JS, DS, cfg1);
+    const total = rig.instances.filter((o) => o.judgable !== false).length;
+    const q1 = rig.judge.registerObstacles(rig.instances).slice();
+    const q2 = rig.judge.registerObstacles(rig.instances).slice();
+    eq('misstorm: 第二次 registerObstacles 队列长度不增（幂等）', q2.length, q1.length);
+    eq('misstorm: 两次登记后队列长度 = 可判对象数', q2.length, total);
+    eq('misstorm: 两次登记后队列内 id 无重复', new Set(q2.map((o) => o.id)).size, q2.length);
+    eq('misstorm: 两次登记后 pendingCount ≤ 可判对象数', rig.judge.pendingCount(), total);
+    const five = rig.instances.filter((o) => o.judgable !== false).slice(0, 5);
+    eq('misstorm: 同一 id 重复喂入被去重（append 语义的防线）', rig.judge.registerObstacles(five.concat(five)).length, 5);
+    // 终态不许被「重同步」改写（运行中路径），但重开路径（registerObstacles）仍回 pending 基线（T6）
+    const first = five[0];
+    rig.judge.registerObstacles(rig.instances);
+    rig.judge.onInput(JS.expectedAction(first.type), first.timeSec);
+    eq('misstorm: 前置——首实例已 judged', first.state, 'judged');
+    const hasSync = typeof rig.judge.syncObstacles === 'function';
+    ok('misstorm: 存在与重开语义分离的运行中重同步入口 syncObstacles', hasSync, `typeof=${typeof rig.judge.syncObstacles}`);
+    if (hasSync) {
+      // 口径纠正（leader，2026-11-23）：pendingList/pendingCount 只数「活着」的成员（_live），
+      // 上面那次 onInput 已经把 first 消费掉，所以这里的绝对值天然是 total-1，
+      // 拿它去等式比 total 是断言写错、不是实现写错。本条真正要守的不变量是
+      // **「重同步本身不增不减队列成员」**，因此改成前后对差。
+      const before = rig.judge.pendingList().length;
+      rig.judge.syncObstacles(rig.ds.activeInstances());
+      eq('misstorm: syncObstacles 不把 judged 拉回 pending', first.state, 'judged');
+      eq('misstorm: syncObstacles 不增不减未判定成员（队列长度守恒）', rig.judge.pendingList().length, before);
+      eq('misstorm: syncObstacles 后 pendingList 内 id 仍无重复', new Set(rig.judge.pendingList().map((o) => o.id)).size, before);
+      eq('misstorm: pendingCount 与 pendingList 同口径', rig.judge.pendingCount(), before);
+    }
+    rig.ds.detach();
+  }
+
+  /* —— ② 关键回归：一局 60s 完整仿真（拆解→寂静→终点），MISS ≤ 本局出现过的可判事件数 —— */
+  const runA = simRun(PG, MC, JS, DS, cfg1, { coreHits: 4 });
+  const stA = runA.rig.ds.stats();
+  const total = runA.judgable;
+  const missA = runA.penalized.filter((j) => j.grade === 'MISS').length;
+  const missIdsA = new Set(runA.penalized.filter((j) => j.grade === 'MISS').map((j) => j.obstacleId)).size;
+  // R6 口径纠正（leader 2026-11-24）：原写法「miss ≤ 初始谱面 55」把分母口径写死了——DIS-05 复活会合法
+  // 下发 -rvN 新实例，事件总数必然超过初始谱面（R5 仿真实测 A 局 101 > 55）。真正的上界是
+  // **本局实际出现过的可判事件数**（stats().total，R6 修订后的分母），风暴（同一障碍重复计账）下这条才红。
+  ok(`misstorm: A 局（只打 4 个核心鼓点→拆鼓→寂静→终点）MISS ≤ 本局出现过的可判事件数`, stA.miss <= stA.total, `miss=${stA.miss} / 分母=${stA.total}（初始谱面 ${total}）`);
+  ok('misstorm: A 局 MISS 不超过被 MISS 的不同 obstacleId 个数之和（重复计账的红线）', missIdsA <= stA.total, `不同 id=${missIdsA}`);
+  // 场景诚实化（leader，2026-11-23）：A 局整局只按 4 次，其余障碍必然各过期一次，
+  // 所以「miss 恰为 1」把这个场景的前提写错了（正确实现下是 51，风暴下是 149903）。
+  // 真正紧的不变量是「MISS 条数 = 被 MISS 的**不同障碍**个数」——风暴下同一障碍重复计账，
+  // 这条必然红；正确实现下必然等。
+  eq('misstorm: A 局 MISS 条数 = 被 MISS 的不同障碍个数（同一障碍不重复计账）', stA.miss, new Set(runA.penalized.filter((j) => j.grade === 'MISS').map((j) => j.obstacleId)).size);
+  ok('misstorm: A 局四次命中全部记为 Perfect', stA.perfect >= 4, `perfect=${stA.perfect}`);
+  eq('misstorm: A 局每个障碍最多产生 1 条有惩罚判定（无重复入队）', new Set(runA.penalized.map((j) => j.obstacleId)).size, runA.penalized.length);
+  ok('misstorm: A 局待判定队列峰值 ≤ 可判对象数（页内诊断曾见 105/91）', runA.probe.maxPending <= total, `峰值 ${runA.probe.maxPending} / 可判 ${total}`);
+  ok('misstorm: A 局队列长度全程 ≤ 可判对象数', runA.probe.maxQueue <= total, `峰值 ${runA.probe.maxQueue}`);
+  eq('misstorm: A 局队列内 id 从未出现重复', runA.probe.dupIds, 0);
+  eq('misstorm: A 局确实走到了拆解（不是空跑的绿）', JSON.stringify(runA.rig.ds.hpByTrack()), '{"kick":0,"bass":0,"synth":0}');
+  ok('misstorm: A 局含拆解→寂静→终点三段', `${runA.rig.ev.filter((e) => e.name === 'disassemble').length}/${runA.rig.ev.some((e) => e.name === 'state-change' && e.to === 'SILENCE')}/${stA.state}`, '1/true/RESULT');
+  // R6 口径纠正：原写法把 dotMiss 用 `stA.miss` 表达（`${stA.dotMiss > 0}/${stA.miss === missA}`），
+  // 场景一变就自指。改成两个数各自独立可核对：dotMiss 由**光点表**核对（寂静段一个都没踩 →
+  // 每个光点各过期一次），miss 由**判定流**核对（只含有惩罚的障碍 MISS），二者互不掺入。
+  const dotsGoneA = stA.dots.filter((d) => d.state === 'expired' || d.state === 'relit').length;
+  eq('misstorm: A 局寂静段光点 MISS 单列（dotMiss = 光点表里未踩灭而过期的个数，独立于 miss）', stA.dotMiss, dotsGoneA);
+  ok('misstorm: A 局寂静段没踩光点 → dotMiss > 0，且 miss 不受它影响（仍等于判定流里的障碍 MISS 条数）', stA.dotMiss > 0 && stA.miss === missA, `dotMiss=${stA.dotMiss} miss=${stA.miss} feedMiss=${missA}`);
+  eq('misstorm: A 局 miss 只等于有惩罚的障碍 MISS 条数（唯一口径）', stA.miss, missA);
+  eq('misstorm: A 局 Perfect 不被重放污染', `${stA.perfect}/${stA.corePerfect}`, '4/4');
+  eq('misstorm: A 局 maxCombo 等于判定流里的最长连击（过期补发不参与连击）', stA.maxCombo, (() => {
+    let best = 0;
+    let cur = 0;
+    for (const j of runA.penalized) {
+      if (j.grade === 'MISS') cur = 0;
+      else cur += 1;
+      best = Math.max(best, cur);
+    }
+    return best;
+  })());
+
+  const runB = simRun(PG, MC, JS, DS, cfg1, { coreHits: 0 });
+  const stB = runB.rig.ds.stats();
+  eq(`misstorm: B 局（全程不按键）MISS 恰为可判对象数 ${total}（超时补发仍在）`, stB.miss, total);
+  // R6 ① 的极端局：全过期不按键 → Perfect 率必须恰为 0（旧口径下也是 0，这里守的是「分母不为 0 时不倒挂」）
+  eq('misstorm: B 局极端全过期局 perfectRate 恰为 0', stB.perfectRate, 0);
+  eq('misstorm: B 局极端局分母自洽（total ≥ perfect+good+miss）', stB.total >= stB.perfect + stB.good + stB.miss, true);
+  eq('misstorm: B 局队列内 id 无重复', runB.probe.dupIds, 0);
+  ok('misstorm: B 局队列峰值不超可判对象数', runB.probe.maxQueue <= total, `峰值 ${runB.probe.maxQueue}`);
+
+  /* —— ③ 三轨关（有 bass/synth 持续供给 MISS）：拆解 + 复活 + 寂静一路跑到底 —— */
+  {
+    const cfg3 = synthCfg({
+      sections: [
+        { beat: 0, state: 'INTRO', layers: [] },
+        { beat: 4, state: 'BUILD', layers: ['kick', 'bass', 'synth', 'bed'] },
+        { beat: 8, state: 'PEAK', layers: ['kick', 'bass', 'synth', 'bed'] },
+        { beat: 56, state: 'SILENCE', layers: [] }
+      ]
+    });
+    const clock = new MC.MockClock({ t: 0 });
+    clock.init({ bpm: cfg3.bpm, sections: cfg3.sections, introBeats: cfg3.introBeats, lengthBeats: cfg3.lengthBeats });
+    clock.start(0);
+    const inst = synthInstances(clock, { kick: [8, 9, 10, 11, 40, 41], bass: [16, 17, 18, 19, 42, 43], synth: [24, 25, 26, 27, 44, 45], bed: [12, 13] });
+    const events = new JS.EventLog();
+    const judge = JS.createJudgeSystem({ clock, events });
+    const ds = DS.createDisassembleSystem({ clock, events });
+    judge.setWindowScale(1);
+    ds.load(cfg3, { instances: inst });
+    ds.bindJudge(judge);
+    ds.attach(); // 段落驱动 + 关卡终点收口（与 LevelRuntime.attach 同一步）
+    judge.registerObstacles(inst);
+    const probe = { resyncs: 0, maxQueue: 0, maxPending: 0, dupIds: 0 };
+    const rig = { clock, judge, ds, instances: inst, feed: [], ev: [], JS };
+    wireRuntimeResync(rig, probe);
+    for (const name of ['hp-change', 'disassemble', 'revive', 'state-change']) {
+      ds.on(name, (p) => rig.ev.push({ name, ...p }));
+    }
+    judge.onJudgment((j) => {
+      rig.feed.push(j);
+      ds.onJudgment(j);
+    });
+    const live = inst.filter((o) => o.judgable !== false).sort((a, b) => a.timeSec - b.timeSec);
+    let ptr = 0;
+    let hits = 0;
+    while (clock.time() < clock.timeAtBeat(cfg3.lengthBeats) + 1.5) {
+      clock.advanceBy(0.025);
+      while (ptr < live.length && live[ptr].timeSec <= clock.time() + 0.001) {
+        const o = live[ptr];
+        if (hits < 10) {
+          hits += 1;
+          judge.onInput(JS.expectedAction(o.type), o.timeSec);
+        }
+        ptr += 1;
+      }
+      probe.maxPending = Math.max(probe.maxPending, judge.pendingCount());
+      if (ds.state() === 'RESULT') break;
+    }
+    const judgable = live.length;
+    const st = ds.stats();
+    const penalized = rig.feed.filter((j) => j.penalizes !== false && j.rule !== 'emptyBeat');
+    ok(`misstorm: C 局（三轨、打 10 个后停手）MISS ≤ 可判对象数 ${judgable}`, st.miss <= judgable, `miss=${st.miss} / 可判=${judgable}`);
+    eq('misstorm: C 局每个障碍最多 1 条有惩罚判定', new Set(penalized.map((j) => j.obstacleId)).size, penalized.length);
+    eq('misstorm: C 局队列内 id 无重复', probe.dupIds, 0);
+    ok(`misstorm: C 局队列峰值 ≤ 可判对象数 ${judgable}`, probe.maxQueue <= judgable && probe.maxPending <= judgable, `队列 ${probe.maxQueue} / pending ${probe.maxPending}`);
+    ok('misstorm: C 局复活（revive）确实发生过（DIS-03 路径未被关掉）', rig.ev.filter((e) => e.name === 'revive').length > 0, `revive=${rig.ev.filter((e) => e.name === 'revive').length}`);
+    eq('misstorm: C 局跑到终点 RESULT', ds.state(), 'RESULT');
+    note(`misstorm：A 局 miss=${stA.miss} 队列峰值=${runA.probe.maxPending}；B 局 miss=${stB.miss}；C 局 miss=${st.miss} resync=${probe.resyncs}`);
+  }
+
+  /* —— ④ R6 分母回归（D 局）：只打鼓、放过 bass/synth → 拆鼓 → 复活补发 -rvN → 补发实例被判定 ——
+     旧口径下这些新事件计入分子却不计入分母（leader 的 Node 仿真实测 perfectRate=1.909、评级还报 S）。 */
+  {
+    const cfgD = synthCfg({
+      sections: [
+        { beat: 0, state: 'INTRO', layers: [] },
+        { beat: 4, state: 'BUILD', layers: ['kick', 'bass', 'synth', 'bed'] },
+        { beat: 8, state: 'PEAK', layers: ['kick', 'bass', 'synth', 'bed'] },
+        { beat: 56, state: 'SILENCE', layers: [] }
+      ]
+    });
+    const clock = new MC.MockClock({ t: 0 });
+    clock.init({ bpm: cfgD.bpm, sections: cfgD.sections, introBeats: cfgD.introBeats, lengthBeats: cfgD.lengthBeats });
+    clock.start(0);
+    const inst = synthInstances(clock, { kick: [8, 9, 10, 11, 40, 41], bass: [16, 17, 18, 19, 42, 43], synth: [24, 25, 26, 27, 44, 45], bed: [12, 13] });
+    const events = new JS.EventLog();
+    const judge = JS.createJudgeSystem({ clock, events });
+    const ds = DS.createDisassembleSystem({ clock, events });
+    judge.setWindowScale(1);
+    ds.load(cfgD, { instances: inst });
+    ds.bindJudge(judge);
+    ds.attach();
+    judge.registerObstacles(inst);
+    const probeD = { resyncs: 0, maxQueue: 0, maxPending: 0, dupIds: 0 };
+    const rig = { clock, judge, ds, instances: inst, feed: [], ev: [], JS };
+    wireRuntimeResync(rig, probeD);
+    judge.onJudgment((j) => {
+      rig.feed.push(j);
+      ds.onJudgment(j);
+    });
+    const judgable = inst.filter((o) => o.judgable !== false).length;
+    const seenIds = new Set(); // 本局在判定队列里**实际出现过**的不同可判 id（分母的独立核对口径）
+    while (clock.time() < clock.timeAtBeat(cfgD.lengthBeats) + 1.5) {
+      clock.advanceBy(0.025);
+      const pend = judge.pendingList();
+      for (const o of pend) seenIds.add(o.id);
+      // 命中策略：只打「当前在队列里的 kick」（含 DIS-05 复活补发的 -rvN 新实例），其余全部放过
+      for (const o of pend) {
+        if (o.track !== 'kick') continue;
+        if (o.timeSec <= clock.time() + 0.001 && o.timeSec > clock.time() - 0.06) judge.onInput(JS.expectedAction(o.type), o.timeSec);
+      }
+      probeD.maxPending = Math.max(probeD.maxPending, judge.pendingCount());
+      if (ds.state() === 'RESULT') break;
+    }
+    const penalizedD = rig.feed.filter((j) => j.penalizes !== false && j.rule !== 'emptyBeat');
+    const rvJudged = penalizedD.filter((j) => /-rv\d+$/.test(j.obstacleId)).length;
+    const stD = ds.stats();
+    // 防风暴的三条照旧守着（不许放松）：复活补发也不许让同一障碍出现两条有惩罚判定
+    eq('misstorm: D 局每个障碍最多 1 条有惩罚判定', new Set(penalizedD.map((j) => j.obstacleId)).size, penalizedD.length);
+    eq('misstorm: D 局队列内 id 无重复', probeD.dupIds, 0);
+    ok('misstorm: D 局队列峰值 ≤ 本局出现过的可判事件数', probeD.maxPending <= stD.total, `峰值 ${probeD.maxPending} / 分母 ${stD.total}`);
+    // 前置：本局确实出现了 -rvN 事件、且事件总数已经超过初始谱面（否则下面的分母断言是空跑的绿）
+    ok('misstorm: D 局复活补发实例进入了判定流（rv 事件 > 0）', rvJudged > 0, `rv 判定条数=${rvJudged} / 有惩罚判定=${penalizedD.length} / 初始谱面=${judgable}`);
+    ok('misstorm: D 局本局可判事件数 > 初始谱面（旧固定分母的缺陷场景成立）', penalizedD.length + rvJudged > judgable, `判定=${penalizedD.length} + rv=${rvJudged} / 初始谱面=${judgable}`);
+    // ★ 分母口径的独立核对：total 必须等于「判定队列里真实出现过的不同 id 数」（初始谱面 + 复活补发）。
+    //   这条在改动前必红：旧实现只数初始谱面 18，而本局出现了 20 个不同可判事件。
+    eq('misstorm: D 局分母 = 本局出现过的不同可判 id 数（独立核对，含 -rvN）', stD.total, seenIds.size);
+    ok('分母含复活事件：total ≥ perfect+good+miss', stD.total >= stD.perfect + stD.good + stD.miss, `total=${stD.total} / P${stD.perfect}+G${stD.good}+M${stD.miss} / 初始谱面=${stD.baseTotal}`);
+    eq('perfectRate 不超过 1', stD.perfectRate <= 1, true);
+    ok('misstorm: D 局 perfectRate 的分母是出现事件数而非初始谱面', Math.abs(stD.perfectRate - stD.perfect / seenIds.size) < 1e-12, `perfectRate=${stD.perfectRate.toFixed(6)} / P${stD.perfect}÷${seenIds.size}`);
+    ok('misstorm: D 局 coreTotal 与 total 同口径（复活的核心节点算进分母）', stD.coreTotal >= stD.baseCoreTotal + rvJudged && stD.coreHitRate <= 1, `coreTotal=${stD.coreTotal} / base=${stD.baseCoreTotal} / rv=${rvJudged} / coreHitRate=${stD.coreHitRate.toFixed(3)}`);
+    ok('misstorm: D 局（拆完又复活、放过两轨）评级不再被奖励成 S', stD.rank !== 'S', `rank=${stD.rank} perfectRate=${stD.perfectRate.toFixed(3)} miss=${stD.miss}`);
+    ds.reset();
+    eq('misstorm: D 局 reset 后分母回初始谱面基线（K-05，不跨局累加）', `${ds.total()}/${ds.coreTotal()}`, `${judgable}/${judgable}`);
+    note(`misstorm：D 局（只打鼓）事件=${penalizedD.length} 分母=${stD.total}（初始 ${stD.baseTotal}）rv 判定=${rvJudged} perfect=${stD.perfect} miss=${stD.miss} perfectRate=${stD.perfectRate.toFixed(3)} rank=${stD.rank}`);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* case: cr14 — CR-14 仲裁：MockClock 缺省 start() 的 leadSec 语义回归   */
+/* ------------------------------------------------------------------ */
+
+async function caseCr14() {
+  const MC = await load('src/mocks/MockClock.js', 'cr14');
+  const BC = await load('src/audio/BeatClock.js', 'cr14');
+  if (!MC || !BC) return;
+
+  // 批复口径：new MockClock({t:1.15}).start()（不带参）走缺省提前量 → 原点恰为 1.25，
+  // 且 25ms 网格第一次轮询就落在原点那一格（离线仿真必须能表达「墙钟比原点早一个提前量」）。
+  const clock = new MC.MockClock({ t: 1.15 });
+  clock.init({ bpm: 120, sections: [{ beat: 0, state: 'INTRO', layers: [] }], introBeats: 4, lengthBeats: 32 });
+  const seen = [];
+  clock.onEvent((ev) => seen.push(`${ev.type}@${ev.timeSec.toFixed(3)}`)); // 订阅在 start 之前：原点那一拍不能被漏掉
+  clock.start();
+  eq('cr14: 缺省 start() 的原点 = t + leadSec = 1.25', clock.originSec(), 1.25);
+  eq('cr14: 缺省 start() 不把墙钟同步到原点（t 仍 1.15）', clock.time(), 1.15);
+  let originLead = null;
+  clock.schedule((_t, lead) => {
+    if (originLead === null) originLead = lead;
+  }, 1.25);
+  const stepSec = BC.CLOCK_POLL_MS / 1000;
+  for (let i = 0; i < 4; i += 1) clock.advanceBy(stepSec);
+  near('cr14: 4 格 25ms 网格恰落在原点（无残留半格）', clock.time(), clock.originSec(), 1e-9, 's');
+  ok('cr14: 原点那一拍在网格上被派发过（离线仿真不会出现「原点那一格永不出现」）', seen.some((s) => s.endsWith('@1.250')), seen.join('|') || '(无事件)');
+  ok('cr14: 第一次轮询派发时提前量非负（引擎的「宁缺不糊」不会把它当迟到跳掉）', originLead !== null && originLead >= -1e-9, `lead=${originLead}`);
+  // 对照：带参 start(atSec) 的重开语义仍把墙钟同步到原点（C1 已批复，两种语义并存）
+  const c2 = new MC.MockClock({ t: 0 });
+  c2.init({ bpm: 120, sections: [{ beat: 0, state: 'INTRO', layers: [] }], introBeats: 4, lengthBeats: 32 });
+  c2.start(1.25);
+  eq('cr14: 带参 start(atSec) 仍同步时间源（重开基线不变）', `${c2.originSec()}/${c2.time()}`, '1.25/1.25');
+  note('CR-14 已批复：leadSec 语义在缺省 start() 路径上，带参 start(atSec) 保留重开同步；本 case 固化两者。');
+}
+
+/* ------------------------------------------------------------------ */
 /* 入口                                                                 */
 /* ------------------------------------------------------------------ */
 
 const CASES = [
   ['clock', caseClock],
   ['judge', caseJudge],
+  ['misstorm', caseMissStorm],
+  ['cr14', caseCr14],
   ['physics', casePhysics],
   ['save', caseSave],
   ['eventlog', caseEventLog],

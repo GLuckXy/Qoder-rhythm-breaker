@@ -191,6 +191,14 @@ export class JudgeSystemCore {
     this._lo = 0;
     this._lastLandSec = Number.NaN;
     this._beatConsumed.clear();
+    for (const off of this._armed().values()) {
+      try {
+        off();
+      } catch {
+        /* 退订失败不阻断重开 */
+      }
+    }
+    this._armed().clear();
     this._log?.clear();
   }
 
@@ -203,6 +211,22 @@ export class JudgeSystemCore {
    * 也不产生任何 judge 事件**——否则背景节点会被超时 MISS 污染耐久与事件流。缺省视为可判定。
    */
   registerObstacles(instances) {
+    return this._ingest(instances, { requeue: true });
+  }
+
+  /**
+   * 运行中的**队列重同步**（JDG-05 的第二个入口，唯一正确的收口点）：
+   * 拆解「停止生成」要把该类 pending 实例摘队，复活「补发未来事件」要把新实例入队，
+   * 两处都只应当**增删队列成员**，绝不改写任何实例的 state/grade——
+   * 若误用 registerObstacles（重开语义：把终态拉回 pending），已判过的障碍会被重新挂上超时定时器，
+   * 每一次超时又是一次 MISS→revive→再登记，MISS 会指数级放大（R5 的浏览器实测 MISS 风暴根因）。
+   * 入队仍跳过 `judgable === false`，并保证同一 `id` 在队列里只有一份。
+   */
+  syncObstacles(instances) {
+    return this._ingest(instances, { requeue: false });
+  }
+
+  _ingest(instances, { requeue }) {
     const list = Array.isArray(instances) ? instances.slice() : [];
     const judgable = [];
     this._ignored = 0;
@@ -213,13 +237,15 @@ export class JudgeSystemCore {
         return; // 背景/装饰层：保持原对象不动，交给 WORLD 的 timeline 渲染
       }
       if (typeof o.id !== 'string') o.id = `lv-unknown-${i}`;
-      // T6「本局重开」：registerObstacles 是重开路径上唯一的入队口，同一批实例再次登记时必须
-      // 回到待判定基线——否则上一局写回的终态（judged / expired）会让重开的整局 0 判定、
-      // 分母与 Perfect 数一起漂走（K-05 的 20 次重开基线断言就是抓它的）。
-      // 'revived' 是生成侧下发的新实例（DIS-05），不是终态，保留。
-      if (o.state !== 'pending' && o.state !== 'revived') {
-        o.state = 'pending';
-        o.grade = null;
+      if (requeue) {
+        // T6「本局重开」：registerObstacles 是重开路径上唯一的入队口，同一批实例再次登记时必须
+        // 回到待判定基线——否则上一局写回的终态（judged / expired）会让重开的整局 0 判定、
+        // 分母与 Perfect 数一起漂走（K-05 的 20 次重开基线断言就是抓它的）。
+        // 'revived' 是生成侧下发的新实例（DIS-05），不是终态，保留。
+        if (o.state !== 'pending' && o.state !== 'revived') {
+          o.state = 'pending';
+          o.grade = null;
+        }
       }
       if (o.grade === undefined) o.grade = null;
       if (!Number.isFinite(o.timeSec)) {
@@ -227,12 +253,46 @@ export class JudgeSystemCore {
       }
       judgable.push(o);
     });
-    this._obstacles = judgable.sort((a, b) => a.timeSec - b.timeSec);
+    // 幂等收口：同一 id 只保留队列里的第一份（重复入队 = 重复 MISS）
+    const seen = new Set();
+    this._obstacles = judgable
+      .filter((o) => (seen.has(o.id) ? false : (seen.add(o.id), true)))
+      .sort((a, b) => a.timeSec - b.timeSec);
     this._lo = 0;
-    this._lastLandSec = Number.NaN;
-    this._beatConsumed.clear();
+    if (requeue) {
+      this._lastLandSec = Number.NaN;
+      this._beatConsumed.clear();
+    }
+    this._disarmGone(this._obstacles); // 先退掉已离队实例的超时定时器，再为在场实例补挂
     for (const o of this._obstacles) if (this._live(o)) this._arm(o);
     return this._obstacles;
+  }
+
+  /**
+   * R5（浏览器实测 MISS 风暴的收口点）：实例 → 超时定时器退订函数。
+   * 「摘队」（拆解停止生成、实例离开 `ds.activeInstances()`）**必须同时退掉它已挂的超时定时器**，
+   * 否则退役轨的旧实例仍会在 due 时刻被 `_onTimeout` 补发一次 MISS——它已经不在队列里、
+   * 也不再出现在结算的分母里，却照样进 `_n.miss`，于是 MISS 数远超可判对象数。
+   * 这张表同时充当「该实例当前确实在判定队列里」的唯一凭据。
+   */
+  _armed() {
+    if (!this._armedMap) this._armedMap = new Map();
+    return this._armedMap;
+  }
+
+  /** 把离开队列的实例的超时定时器退掉（拆解摘队 / 重开 / 重复入队都走这里）。 */
+  _disarmGone(next) {
+    const keep = new Set(next);
+    const map = this._armed();
+    for (const [o, off] of [...map.entries()]) {
+      if (keep.has(o)) continue;
+      map.delete(o);
+      try {
+        off();
+      } catch {
+        /* 退订失败不影响其余 */
+      }
+    }
   }
 
   /** 被登记但因 `judgable:false` 跳过的实例数（DebugPanel / selftest 用）。 */
@@ -413,22 +473,43 @@ export class JudgeSystemCore {
 
   /** 超时 MISS 定时器（JDG-05）。due 随窗口变化重算，且不吃 120ms 提前派发。 */
   _arm(o) {
+    const map = this._armed();
+    if (map.has(o)) return; // 同一个实例只挂一只定时器（重同步幂等）
     const due = o.timeSec + this._win.goodMs / 1000;
     if (due < this._clock.now() - 1) return; // 登记时早已过窗：留给复位路径，不挂定时器
-    this._clock.schedule(() => this._onTimeout(o), due);
+    map.set(o, this._sub(o, due));
+  }
+
+  _sub(o, due) {
+    const off = this._clock.schedule(() => this._onTimeout(o), due);
+    return typeof off === 'function' ? off : () => {};
   }
 
   _rearmPending() {
+    const map = this._armed();
+    for (const off of map.values()) {
+      try {
+        off();
+      } catch {
+        /* 退订失败不阻断窗口切换 */
+      }
+    }
+    map.clear();
     for (const o of this._obstacles) if (this._live(o)) this._arm(o);
   }
 
   _onTimeout(o) {
+    const map = this._armed();
+    // ★ MISS 的唯一闸门：定时器还在表上 = 这个实例当前确实在判定队列里。
+    //   拆解「停止生成」把实例摘队时（_disarmGone）退订即失效，退役轨不会再补发过期 MISS。
+    if (!map.has(o)) return;
+    map.delete(o);
     if (!this._live(o)) return;
     const due = o.timeSec + this._win.goodMs / 1000;
     const nowSec = this._clock.now();
     if (nowSec < due - 0.002) {
       // 预调度允许提前 ≤120ms 派发；未到真正 due 时刻 → 重挂，保证 MISS 不早于窗口结束
-      this._clock.schedule(() => this._onTimeout(o), due);
+      map.set(o, this._sub(o, due));
       return;
     }
     o.state = 'expired';

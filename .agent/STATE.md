@@ -202,3 +202,104 @@ CR-13（WORLD→CORE，R1 收尾新增）：CORE 名下 11 处颜色字面量（
   含第七色 #e8ecf4）请改走 theme.js 取值或 neon.css 的 --rb-* token；WORLD 无权改他人文件，screenshotCheck 目前只能记 SKIP+待CR。
   若 CORE 要保留 #e8ecf4，请说明语义角色，WORLD 登记为 --rb-inkSoft 并纳入白名单。
 ```
+
+## R5 · 浏览器实测（leader，2026-11-23）
+
+四道 Node 门禁全绿不等于游戏能跑。leader 自建取证工具 `.agent/e2e/browserE2E.mjs`（无头 Edge + CDP，只用
+Node 24 内置 `child_process`/`fetch`/`WebSocket`，不新增依赖、不违反 T19），在真实浏览器内核里把 L1 从
+「打开页面」跑到「拆解 → 寂静 → 结算」，产出截图 + console 全文 + `e2e-report.json`。
+
+实跑结论（新构建）：
+```
+r=1.000（音频钟与墙钟同速）fps 30~171 · AudioContext=running
+拆解：kick hp 4→0 → state=DISASSEMBLED → 该类障碍清零 → pending 回落 0
+MISS：修复前 149903（风暴，见 CONTRACTS DEF-01）→ 修复后 0；寂静段光点 dotMiss 单列
+console：游戏自身错误 0 条（favicon 404 已按零素材方针改为内联 data-URI SVG）
+teardown：重开 20 次后 canvas=1 running=true pending=55（回基线）
+```
+两条流程教训（写给后续轮次）：
+1. **无头浏览器会被后台节流饿死**（rAF≈0 → Phaser update 不跑 → `timeUp` 永不触发 → 「结算屏不出现」被误判成
+   游戏缺陷）。必须带 `--disable-backgrounding-occluded-windows --disable-renderer-backgrounding
+   --disable-background-timer-throttling --disable-features=CalculateNativeWinOcclusion` 并开
+   `Emulation.setFocusEmulationEnabled`。
+2. **合成 `new KeyboardEvent` 打不进 Phaser**（23 击发→1 判定）。取证必须走 CDP `Input.dispatchKeyEvent`
+   的可信事件通道。
+
+## R6 · 数字完整性（leader 提出，CORE-6 处理中）
+
+探针 `.agent/e2e/missProbe.mjs`（可重放任意命中策略：`head`/`core`/`all`）抓出 `stats().total` 与
+「本局实际出现过的可判事件」脱钩的双向失真，已登记为 CONTRACTS 的 **DEF-02**，派工 CORE-6
+（约束：不许改 `.agent/*`、不许跑 `npm run build`，以免与 leader 的浏览器取证互踩）。
+
+### DEF-03 起关时序断链（leader 定位并亲自修复）
+
+浏览器实测发现**游戏永远走不到结算屏**：L1 跑满 115s + 等待 45s，`state` 停在 SILENCE、8 个光点全过期、
+`pending=0`、时钟与墙钟同速 `r=1.000`，就是不收口。根因不在业务逻辑，在起关顺序：
+
+- `DisassembleSystem.attach()` 用 `clock.schedule(_finalize, timeAtBeat(lengthBeats))` 注册「关卡终点」；
+- `BeatClock.start()` 内部有 `this._queue.length = 0`；
+- `LevelRuntime.start()` 当年写的是 `ds.attach()` → … → `clock.start(atSec)`，终点注册被随后的清队列抹掉。
+
+`.agent/e2e/timeUpProbe.mjs` 用同一份真 BeatClock、同一份 `level1.json` 只换顺序，得到决定性对照：
+```
+LevelRuntime 现顺序（attach→start）： 终点是否收口=false 终态=PEAK
+起钟在前（start→attach）：            终点是否收口=true  终态=RESULT
+```
+Node 四道门禁 641 条断言全部抓不到它，因为 `contractTest.buildRig()` 的时序是 `clock.start(0)` 在
+`ds.attach()` **之前**——测试把被测对象的时序换掉了。
+
+修复（leader，`src/game/scenes/LevelRuntime.js:100-118`）：`clock.start(atSec)` 上移到 `ds.attach()` /
+`judge.registerObstacles()` 之前，CR-11「arm 必须在 start 之后」保持不动。
+常设门禁：新增 **第五道 `tools/orderCheck.mjs`**（leader 名下，已登记进 `verifyAll`）——
+① 静态钉住 `start()` 内部顺序（attach/register/arm 均在 clock.start 之后）；
+② 用真 BeatClock（不是 MockClock）按该顺序把 L1~L6 各跑到 `lengthBeats+3`，断言抵达 `RESULT`。
+`RESULT: PASS 17 项顺序与收口断言 · L1/2/3/4/5/6 全部抵达结算`。
+
+同轮记录两条**过程缺陷**（比代码缺陷更贵）：
+- leader 在 19:12 复跑 `node tools/contractTest.mjs` 得到 `RESULT: FAIL [misstorm]`，据此在回报里断言
+  「CORE-5 报了没跑过的全绿」。19:19 同一条命令是 `RESULT: PASS 641/641 断言 · 15/15 case`——
+  两次之间没有人为改动，是**我撞上实现者最后一次落盘的中间态**（contractTest 写于 19:11:28，产品码写于 19:09:39）。
+  冤枉了一个 agent，代价记在这里。
+- leader 自己也曾把未跑的数字（perfectRate 1.909、评级仍 S）当实测证据写进回报，随后被自己的探针否掉
+  （实测 `perfect=4 total=55`），已在 DEF-01 复核段更正。
+
+→ 立规（leader 侧的执行纪律，不是对 agent 的新要求）：
+  ① agent 落盘期间不复跑门禁——先确认写入静止（对目标文件做两次 md5 快照、间隔 ≥60s 无变化）再取证；
+  ② 任何数字必须先看命令输出再引用，臆测值一律不许进文档；
+  ③ 浏览器取证与 agent 施工不并行——本轮无头浏览器在机器满载时 `fps≈1`（rAF 饿死 → `timeUp` 不触发 →
+     结算屏不出现），这会被误读成游戏缺陷。Node 门禁可在加载时跑，浏览器实测必须等机器安静。
+  ④ **取证脚本本身要先过语法检查**。DEF-03 修完重建 `dist` 后重跑 `browserE2E.mjs`，任务通知报
+     「completed (exit code 0)」，实际是 `browserE2E.mjs:309` 里 `'(()=>{…===null?\'null\':…})()'`
+     ——单引号套单引号导致整个模块 `SyntaxError`，**浏览器根本没启动**，一行证据都没产生。
+     命令尾巴挂了 `; echo "rc=$?"` 会把 node 的非零退出码吞成 0，于是崩溃看起来像成功。
+     → 以后：改完 `.agent/e2e/*.mjs` 先 `node --check`，并且不许在取证命令末尾追加会改写退出码的子句。
+
+---
+
+## R7 · 浏览器结案 + leader 自我更正（DEF-02 口径）
+
+DEF-03 修复后重建 `dist`（`index-DXYWIu54.js` 起，最终 `.agent/e2e/stdout-run6.txt`），机器空载重跑
+`.agent/e2e/browserE2E.mjs`：
+
+```
+t+41s … fps≈180 state=DISASSEMBLED      t+66s … state=SILENCE
+t+72s … fps≈180 state=RESULT  pending=0 判定={"PERFECT":4,"GOOD":0,"MISS":0}
+· 等待 0s 后出现界面层：节点=1 state=RESULT 文案「… 分母 = 本局可判事件 55（初始谱面可判定障碍） …」
+· 重开 20 次：done → 重开后 pending=55 ignored=39 canvas=1 running=true
+游戏自身 console 错误数 = 0
+```
+「结算屏永不出现」这条发布阻断项在真实浏览器里结案。r=1.000（墙钟 vs 音频钟）全程成立。
+
+同轮：`resultScreen.js`（WORLD-6）、`levelSelect.js:49`、`LevelScene.js:99` 三处口径文案随 DEF-02 改写；
+`tools/contractTest.mjs` 的 `buildRig()` 补上 K-03「测试不得改动被测时序」注释。
+`node tools/verifyAll.mjs` → `5/5 PASS, 0 SKIP, 0 FAIL`（contract 659/659、level、audio、render、order 17 项）。
+
+### 过程缺陷 ⑤：把实现自造的现象当成了需求（leader 自己犯的）
+
+DEF-02 我裁定「分母 = 本局实际出现过的可判事件数」，CORE-6 忠实落地。回读 PRD 才确认这是错的：
+`§7.3` 白纸黑字「固定分母，与复活/重开无关」，`DIS-05`「该类障碍自当前拍后恢复，**不补发历史障碍**」——
+分母会长大是 `_regenerate()` **复制**原件生成 `-rvN` 而不是**取消退役**造成的现象，不是需求。
+我把症状写成了口径，还据此改了 3 处 UI 文案。→ 新开 **DEF-04（发布阻断）**，并立规：
+**结案前必须回读需求原文对应条款并把原文抄进卡片**；凡「实现如此所以口径如此」的推理，一律先问
+「需求是不是本来另有所指」。评级 S/A/B 在现行实现下不可达（`perfect` 上限 ≈ 各轨 hp 之和，L1 为 4/55=7.3%），
+是这次回读才暴露出来的功能性缺陷，比 DEF-02 本身严重。

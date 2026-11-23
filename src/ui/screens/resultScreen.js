@@ -1,7 +1,8 @@
 // src/ui/screens/resultScreen.js — Owner: CORE（K-13 界面⑤：结算 + K-15 的「下一关」出口）
-// 口径（§7.3 + PRD §14）：
-//   · Perfect 率 = PERFECT 数 / **本关可判定障碍总数**（分母不含 judgable:false 的背景层，不随复活与重开变化）
-//   · 核心命中率 = 核心障碍 PERFECT 数 / 核心障碍总数（展示项，不参与 Perfect 率）
+// 口径（§7.3 + PRD §14，R6 修订）：
+//   · Perfect 率 = PERFECT 数 / **本局可判事件数** = 初始谱面可判定障碍 + 复活补发的新实例（DIS-05）
+//     背景层 judgable:false 始终不计入；重开（R）回初始谱面基线，不跨局累加
+//   · 核心命中率 = 核心可判事件 PERFECT 数 / 核心可判事件数（展示项，不参与 Perfect 率）
 //   · rank S/A/B/C 由 DisassembleSystem.rank() 给（S 需 Perfect 率达阈且 MISS=0）
 //   · 寂静段光点的 MISS 单列（dotMiss），它不进 §7.3 的 miss 数
 // 本界面不读时间（T4）：所有数字都来自 stats 快照。
@@ -21,6 +22,19 @@ function stat(label, value, role) {
     [h('div', { class: 'rb-text rb-text-caption', text: label }), h('div', { class: 'rb-text rb-text-hud rb-num', text: String(value) })]
   );
   return box;
+}
+
+/**
+ * 分母口径行（DEF-02 / R6 修订后的文案）：
+ *   分母 = 本局可判事件数 = 初始谱面可判定障碍 + 复活补发的新实例（DIS-05 的 -rvN）。
+ *   补发数为 0 的干净局不写增量（没有的东西不必解释）；老快照缺 baseTotal 时按 total−补发 回推。
+ */
+function denomNote(st) {
+  const total = st.total || 0;
+  const revived = st.revivedIssued || 0;
+  const base = Number.isFinite(st.baseTotal) ? st.baseTotal : Math.max(0, total - revived);
+  const split = revived > 0 ? `（初始谱面可判定障碍 ${base} + 复活补发 ${revived}）` : '（初始谱面可判定障碍）';
+  return `分母 = 本局可判事件 ${total}${split} · PERFECT ${st.perfect || 0} · 核心 ${st.coreTotal || 0} · 背景层不计入`;
 }
 
 function trackRow(track, hp, hpMax, silenced) {
@@ -61,7 +75,7 @@ export function buildResult(data = {}, deps = {}) {
           h('div', { class: 'rb-text rb-text-display rb-glow-system', dataset: { role: 'rank' }, text: rank }),
           col([
             headline(`L${(data.level || {}).id ?? '?'} ${(data.level || {}).title || ''}`, 'rb-text-title'),
-            caption(`${RANK_NOTE[rank] || ''} · ${st.disassembled ? '全声部已拆解 → 寂静段走完' : '未拆完（分母不变，Perfect 率照算）'}`)
+            caption(`${RANK_NOTE[rank] || ''} · ${st.disassembled ? '全声部已拆解 → 寂静段走完' : '未拆完（分母仍按本局可判事件计，Perfect 率照算）'}`)
           ])
         ]),
         row(
@@ -74,7 +88,7 @@ export function buildResult(data = {}, deps = {}) {
           ],
           { style: 'display:flex;gap:1.4em;flex-wrap:wrap;align-items:flex-start' }
         ),
-        caption(`分母 = 本关可判定障碍 ${st.total || 0}（PERFECT ${st.perfect || 0}）· 核心 ${st.coreTotal || 0} · 背景层不计入`),
+        caption(denomNote(st)),
         row(active.map((t) => trackRow(t, hp[t], hpMax[t], (st.disassembledTracks || []).includes(t))), { style: 'display:flex;gap:1.6em;flex-wrap:wrap' }),
         row([next, retry, select, title])
       ].filter(Boolean),
